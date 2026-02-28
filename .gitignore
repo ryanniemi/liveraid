@@ -3,7 +3,6 @@ liveraid
 src/*.o
 src/*.d
 src/version.c
-build_number.txt
 
 # Leftover build artifacts
 snaplive

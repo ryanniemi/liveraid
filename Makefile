@@ -5,6 +5,9 @@ CFLAGS  = -O2 -Wall -Wextra -g -D_FILE_OFFSET_BITS=64 -DFUSE_USE_VERSION=35 \
           $(FUSE_CFLAGS) -MMD -MP
 LDFLAGS = $(FUSE_LIBS) -lpthread -lisal
 
+BUILD_NUM := $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
+VERSION   := v0.01.$(shell printf '%04d' $(BUILD_NUM))
+
 # Main sources (everything except the auto-generated version.c)
 SRC_SRCS = src/main.c src/config.c src/state.c src/alloc.c \
            src/metadata.c src/fuse_ops.c src/parity.c src/journal.c \
@@ -17,13 +20,10 @@ all: liveraid
 liveraid: $(OBJS) src/version.o
 	$(CC) -o $@ $^ $(LDFLAGS)
 
-# Auto-generate version.c whenever any of the main objects are rebuilt.
-# The recipe increments build_number.txt then writes the new version string.
+# Regenerate version.c whenever the commit count changes or objects are rebuilt.
 src/version.c: $(OBJS)
-	@n=$$(( $$(cat build_number.txt 2>/dev/null || echo 0) + 1 )); \
-	 echo $$n > build_number.txt; \
-	 printf 'const char lr_version[] = "v0.01.%04d";\n' $$n > $@; \
-	 echo "  version  v0.01.$$(printf '%04d' $$n)"
+	@printf 'const char lr_version[] = "%s";\n' $(VERSION) > $@
+	@echo "  version  $(VERSION)"
 
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
