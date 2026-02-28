@@ -84,8 +84,9 @@ make
 The binary `liveraid` is placed in the current directory.
 
 ```sh
-make test    # build and run the unit test suite
-make clean   # remove objects, binary, and test binaries
+make test                  # build and run the unit test suite (59 tests, no extra deps)
+bash tests/integration.sh  # live FUSE integration tests (requires fusermount3, ~500 MiB /tmp)
+make clean                 # remove objects, binary, and test binaries
 ```
 
 ## Configuration

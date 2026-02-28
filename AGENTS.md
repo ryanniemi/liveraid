@@ -33,7 +33,7 @@ with no external test framework required.
 | `tests/test_metadata` | `src/metadata.c` + support | Save/load roundtrip (all 11 file fields, all dir fields); fresh-start with no content file; old 8-field format compatibility; allocator state persistence across save/load |
 | `tests/test_config` | `src/config.c` | Valid configs; default values; all placement policies; parity levels and gap detection; error paths (no drives, no content, no mountpoint, bad blocksize, bad parity_threads); unknown directives (non-fatal); comments and blank lines |
 
-### Test conventions
+### Unit test conventions
 
 - Tests are self-contained: they use `/tmp` for any files they create and clean
   up after themselves. No real drives, parity files, or FUSE mounts are needed.
@@ -43,6 +43,35 @@ with no external test framework required.
   on stderr — this is normal and not a test failure.
 - When adding a new source module, add a corresponding `tests/test_<module>.c`
   and a rule in the `Makefile` test section following the existing pattern.
+
+### Integration tests
+
+`tests/integration.sh` mounts a real liveraid filesystem under `/tmp/lrt/` and
+exercises end-to-end behaviour. Prerequisites: `fusermount3` (`apt install fuse3`),
+~500 MiB free in `/tmp`, and the binary built with `make`.
+
+```bash
+bash tests/integration.sh   # run from repo root
+```
+
+The script creates 4 data drives + 2 parity levels, runs 13 test sections, and
+prints a `PASS`/`FAIL` summary. Each section calls `wipe_data` to start clean.
+
+| # | Section | What is exercised |
+|---|---------|-------------------|
+| 1 | parity_threads=4 drain + scrub | Parallel bitmap drain, SIGUSR2 repair, 0 mismatches |
+| 2 | rmdir | Empty-dir removal; ENOTEMPTY on non-empty |
+| 3 | Rename across directories | Cross-dir rename; persistence across remount |
+| 4 | 2-drive failure recovery | Simultaneous loss of 2 drives; transparent read via 2-level parity |
+| 5 | Offline rebuild | `liveraid rebuild` reconstructs 2 drives from parity (no mount) |
+| 6 | Live rebuild + busy-file skip | Socket rebuild skips open files; rebuilds after close |
+| 7 | Crash recovery (kill -9) | Content file survives SIGKILL; parity clean after remount |
+| 8 | Multiple content paths | All paths written on save; secondary used when primary missing |
+| 9 | Empty files | size=0 after create and after remount |
+| 10 | Directory metadata | `chmod` + `utimens` on dirs persist across remount |
+| 11 | Socket scrub/repair | `scrub` and `scrub repair` commands return 0 mismatches via ctrl socket |
+| 12 | Position reuse | Parity position freed by `unlink` is reused by next allocation |
+| 13 | Placement policy smoke | `mostfree`, `lfs`, `pfrd`: 8 files readable + parity clean each |
 
 ## Architecture
 
