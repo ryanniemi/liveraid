@@ -3,6 +3,12 @@ liveraid
 src/*.o
 src/*.d
 src/version.c
+tests/test_alloc
+tests/test_hash
+tests/test_list
+tests/test_state
+tests/test_metadata
+tests/test_config
 
 # Leftover build artifacts
 snaplive
