@@ -29,8 +29,9 @@ int config_load(const char *path, lr_config *cfg)
     int lineno = 0;
 
     memset(cfg, 0, sizeof(*cfg));
-    cfg->block_size      = DEFAULT_BLOCK_SIZE;
+    cfg->block_size       = DEFAULT_BLOCK_SIZE;
     cfg->placement_policy = LR_PLACE_MOSTFREE;
+    cfg->parity_threads   = 1;
 
     f = fopen(path, "r");
     if (!f) {
@@ -130,6 +131,15 @@ int config_load(const char *path, lr_config *cfg)
                 fclose(f);
                 return -1;
             }
+        } else if (strcmp(key, "parity_threads") == 0) {
+            long val = strtol(rest, NULL, 10);
+            if (val < 1 || val > 64) {
+                fprintf(stderr, "config:%d: parity_threads must be between 1 and 64\n", lineno);
+                fclose(f);
+                return -1;
+            }
+            cfg->parity_threads = (unsigned)val;
+
         } else {
             fprintf(stderr, "config:%d: unknown directive '%s'\n", lineno, key);
             /* non-fatal: ignore */

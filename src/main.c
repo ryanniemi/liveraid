@@ -158,7 +158,7 @@ int main(int argc, char *argv[])
     /* ---- Start journal ---- */
     {
         lr_journal *j = calloc(1, sizeof(lr_journal));
-        if (j && journal_init(j, state, 5000) == 0) {
+        if (j && journal_init(j, state, 5000, state->cfg.parity_threads) == 0) {
             state->journal = j;
 
             /* Set persistent bitmap path from first content path */

@@ -32,6 +32,7 @@ typedef struct {
 
     uint32_t       block_size;      /* bytes, multiple of 64 */
     int            placement_policy;
+    unsigned       parity_threads;  /* parallel threads for parity drain (default 1) */
 } lr_config;
 
 /* Parse config file at path into cfg.  Returns 0 on success, -1 on error. */

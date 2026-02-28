@@ -55,8 +55,11 @@ The following operations mark parity positions dirty:
 Dirty positions are recorded in a per-bit bitmap (one bit per position).
 A background worker thread wakes either on signal or after a 5-second
 interval. It atomically swaps out the current bitmap, replaces it with an
-empty one, then drains the old bitmap — calling `parity_update_position` for
-each set bit while holding a read lock on the state.
+empty one, then drains the old bitmap. If `parity_threads` is 1 (default),
+dirty positions are processed serially. If `parity_threads` is greater than 1,
+the dirty positions are collected into an array and divided into equal chunks;
+each chunk is handled by a separate thread, each with its own scratch vector,
+calling `parity_update_position` under a shared read lock on the state.
 
 `parity_update_position` reads one block from each data drive at the given
 position (zero-filling when no file covers that position), calls

@@ -39,6 +39,9 @@ typedef struct lr_journal {
     /* Persistent crash journal */
     char            bitmap_path[PATH_MAX]; /* on-disk dirty-bitmap file; "" = disabled */
 
+    /* Parity drain parallelism */
+    unsigned        nthreads;  /* number of threads to use when draining dirty positions */
+
     /* Scrub / repair */
     volatile sig_atomic_t scrub_pending;  /* set by SIGUSR1 handler */
     volatile sig_atomic_t repair_pending; /* set by SIGUSR2 handler */
@@ -46,7 +49,8 @@ typedef struct lr_journal {
     struct lr_state *state;
 } lr_journal;
 
-int  journal_init(lr_journal *j, struct lr_state *s, unsigned interval_ms);
+int  journal_init(lr_journal *j, struct lr_state *s, unsigned interval_ms,
+                  unsigned nthreads);
 void journal_done(lr_journal *j);
 
 /* Mark positions [start, start+count) as dirty. */

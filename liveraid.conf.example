@@ -27,3 +27,8 @@ mountpoint /srv/array
 
 # Drive selection policy for new files: mostfree | roundrobin
 #placement mostfree
+
+# Number of threads used to drain the dirty-parity bitmap in parallel (default 1)
+# Each thread handles an independent subset of dirty positions.
+# Set to match the number of data drives or available CPU cores, whichever is smaller.
+#parity_threads 4

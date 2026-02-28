@@ -153,6 +153,29 @@ static void journal_bitmap_load(lr_journal *j)
 }
 
 /* ------------------------------------------------------------------ */
+/* Parallel parity drain                                               */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    lr_state *state;
+    uint32_t *positions;
+    uint32_t  count;
+    void    **v;
+} parity_work_t;
+
+static void *parity_worker_thread(void *arg)
+{
+    parity_work_t *w = (parity_work_t *)arg;
+    lr_state      *s = w->state;
+    for (uint32_t i = 0; i < w->count; i++) {
+        pthread_rwlock_rdlock(&s->state_lock);
+        parity_update_position(s, w->positions[i], w->v);
+        pthread_rwlock_unlock(&s->state_lock);
+    }
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /* Background worker                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -225,18 +248,119 @@ static void *worker_thread(void *arg)
 
         /* Process each dirty position */
         if (v && old_bm) {
-            for (uint32_t w = 0; w < old_words; w++) {
-                uint64_t word = old_bm[w];
-                while (word) {
-                    int bit = __builtin_ctzll(word);
-                    uint32_t pos = w * 64 + (uint32_t)bit;
-                    word &= word - 1; /* clear lowest set bit */
+            unsigned nt = j->nthreads > 0 ? j->nthreads : 1;
 
-                    pthread_rwlock_rdlock(&s->state_lock);
-                    parity_update_position(s, pos, v);
-                    pthread_rwlock_unlock(&s->state_lock);
+            if (nt <= 1) {
+                /* Serial path */
+                for (uint32_t w = 0; w < old_words; w++) {
+                    uint64_t word = old_bm[w];
+                    while (word) {
+                        int bit = __builtin_ctzll(word);
+                        uint32_t pos = w * 64 + (uint32_t)bit;
+                        word &= word - 1;
+                        pthread_rwlock_rdlock(&s->state_lock);
+                        parity_update_position(s, pos, v);
+                        pthread_rwlock_unlock(&s->state_lock);
+                    }
                 }
+            } else {
+                /* Parallel path: collect positions, divide across nt threads */
+                uint32_t pos_count = 0;
+                for (uint32_t w = 0; w < old_words; w++)
+                    pos_count += (uint32_t)__builtin_popcountll(old_bm[w]);
+
+                uint32_t *positions = pos_count
+                    ? malloc(pos_count * sizeof(uint32_t)) : NULL;
+
+                if (positions) {
+                    uint32_t idx = 0;
+                    for (uint32_t w = 0; w < old_words; w++) {
+                        uint64_t word = old_bm[w];
+                        while (word) {
+                            int bit = __builtin_ctzll(word);
+                            positions[idx++] = w * 64 + (uint32_t)bit;
+                            word &= word - 1;
+                        }
+                    }
+                }
+
+                if (nt > pos_count && pos_count > 0) nt = pos_count;
+
+                parity_work_t *works   = positions ? malloc(nt * sizeof(parity_work_t))  : NULL;
+                pthread_t     *threads = positions ? malloc((nt-1) * sizeof(pthread_t))  : NULL;
+                void         **fps     = positions ? calloc(nt, sizeof(void *))           : NULL;
+                int            par_ok  = works && threads && fps;
+
+                /* Allocate scratch vectors for threads 1..nt-1 */
+                if (par_ok) {
+                    uint32_t chunk = (pos_count + nt - 1) / nt;
+                    works[0].state     = s;
+                    works[0].positions = positions;
+                    works[0].count     = chunk < pos_count ? chunk : pos_count;
+                    works[0].v         = v;
+                    for (unsigned t = 1; t < nt && par_ok; t++) {
+                        uint32_t start = t * chunk;
+                        uint32_t end   = start + chunk < pos_count
+                                         ? start + chunk : pos_count;
+                        works[t].state     = s;
+                        works[t].positions = positions + start;
+                        works[t].count     = end - start;
+                        works[t].v = lr_alloc_vector((int)(nd + np),
+                                         s->cfg.block_size, &fps[t]);
+                        if (!works[t].v) par_ok = 0;
+                    }
+                }
+
+                if (par_ok) {
+                    /* Spawn threads 1..nt-1, run chunk 0 inline */
+                    int *created = calloc(nt - 1, sizeof(int));
+                    for (unsigned t = 1; t < nt; t++) {
+                        if (created)
+                            created[t-1] = (pthread_create(&threads[t-1], NULL,
+                                            parity_worker_thread, &works[t]) == 0);
+                    }
+                    parity_worker_thread(&works[0]);
+                    for (unsigned t = 1; t < nt; t++) {
+                        if (created && created[t-1])
+                            pthread_join(threads[t-1], NULL);
+                        else
+                            parity_worker_thread(&works[t]);
+                        free(fps[t]);
+                    }
+                    free(created);
+                } else {
+                    /* Fallback: serial over positions array (or bitmap if alloc failed) */
+                    for (unsigned t = 1; t < nt; t++) {
+                        if (fps) free(fps[t]);
+                    }
+                    if (positions) {
+                        for (uint32_t i = 0; i < pos_count; i++) {
+                            pthread_rwlock_rdlock(&s->state_lock);
+                            parity_update_position(s, positions[i], v);
+                            pthread_rwlock_unlock(&s->state_lock);
+                        }
+                    } else {
+                        for (uint32_t w = 0; w < old_words; w++) {
+                            uint64_t word = old_bm[w];
+                            while (word) {
+                                int bit = __builtin_ctzll(word);
+                                uint32_t pos = w * 64 + (uint32_t)bit;
+                                word &= word - 1;
+                                pthread_rwlock_rdlock(&s->state_lock);
+                                parity_update_position(s, pos, v);
+                                pthread_rwlock_unlock(&s->state_lock);
+                            }
+                        }
+                    }
+                }
+
+                free(works);
+                free(threads);
+                free(fps);
+                free(positions);
             }
+            free(old_bm);
+        } else {
             free(old_bm);
         }
 
@@ -291,12 +415,14 @@ static void *worker_thread(void *arg)
 /* Public API                                                           */
 /* ------------------------------------------------------------------ */
 
-int journal_init(lr_journal *j, struct lr_state *s, unsigned interval_ms)
+int journal_init(lr_journal *j, struct lr_state *s, unsigned interval_ms,
+                 unsigned nthreads)
 {
     memset(j, 0, sizeof(*j));
     j->state            = s;
     j->interval_ms      = interval_ms > 0 ? interval_ms : 5000;
     j->save_interval_s  = 300; /* save metadata + bitmap every 5 minutes */
+    j->nthreads         = nthreads > 0 ? nthreads : 1;
     j->running          = 1;
 
     if (pthread_mutex_init(&j->bitmap_lock, NULL) != 0)

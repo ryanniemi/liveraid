@@ -125,6 +125,7 @@ mountpoint /srv/array
 | `mountpoint PATH` | yes | FUSE mount point. |
 | `blocksize KiB` | no | Parity block size in KiB (default 256). Must be a multiple of 64 bytes. |
 | `placement POLICY` | no | `mostfree` (default) or `roundrobin`. |
+| `parity_threads N` | no | Threads used to drain the dirty-parity bitmap in parallel (default 1, max 64). Each thread processes an independent subset of dirty positions. |
 
 ## Usage
 
