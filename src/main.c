@@ -220,7 +220,8 @@ int main(int argc, char *argv[])
         free(state->parity);
         state->parity = NULL;
     }
-    metadata_save(state);
+    if (!state->metadata_saved)
+        metadata_save(state);
     state_done(state);
     free(state);
     free(fuse_argv);

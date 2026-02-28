@@ -1,11 +1,6 @@
 #define FUSE_USE_VERSION 35
 #include <fuse.h>
 
-/* Sentinel value for fi->fh when the file's drive is unavailable but
- * parity recovery is possible.  (uint64_t)-1 = UINT64_MAX; when cast
- * to int it is -1, so close(-1) is never accidentally called. */
-#define LR_DEAD_DRIVE_FH  ((uint64_t)-1)
-
 #include "fuse_ops.h"
 #include "state.h"
 #include "metadata.h"
@@ -23,6 +18,13 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <time.h>
+
+/* Per-open-handle state stored in fi->fh.
+ * fd == -1 means the real drive is unavailable; reads use parity recovery. */
+typedef struct {
+    int  fd;               /* real file descriptor, or -1 for dead-drive opens */
+    char vpath[PATH_MAX];  /* vpath captured at open/create time */
+} lr_fh_t;
 
 /*--------------------------------------------------------------------
  * Helper: build the real path for vpath on a given drive.
@@ -468,9 +470,22 @@ static int lr_open(const char *path, struct fuse_file_info *fi)
     f->open_count++;
     pthread_rwlock_unlock(&s->state_lock);
 
+    lr_fh_t *fh = malloc(sizeof(lr_fh_t));
+    if (!fh) {
+        /* OOM — undo the open_count increment */
+        pthread_rwlock_wrlock(&s->state_lock);
+        lr_file *f2 = state_find_file(s, path);
+        if (f2 && f2->open_count > 0)
+            f2->open_count--;
+        pthread_rwlock_unlock(&s->state_lock);
+        return -ENOMEM;
+    }
+    snprintf(fh->vpath, sizeof(fh->vpath), "%s", path);
+
     int fd = open(real, fi->flags & ~O_CREAT);
     if (fd >= 0) {
-        fi->fh = (uint64_t)fd;
+        fh->fd = fd;
+        fi->fh = (uint64_t)(uintptr_t)fh;
         return 0;
     }
 
@@ -479,11 +494,13 @@ static int lr_open(const char *path, struct fuse_file_info *fi)
     if ((fi->flags & O_ACCMODE) == O_RDONLY &&
         (saved == ENOENT || saved == EIO || saved == ENXIO) &&
         has_parity) {
-        fi->fh = LR_DEAD_DRIVE_FH;
+        fh->fd = -1;
+        fi->fh = (uint64_t)(uintptr_t)fh;
         return 0;
     }
 
     /* Open failed with no recovery path — undo the open_count increment. */
+    free(fh);
     pthread_rwlock_wrlock(&s->state_lock);
     lr_file *f2 = state_find_file(s, path);
     if (f2 && f2->open_count > 0)
@@ -494,15 +511,20 @@ static int lr_open(const char *path, struct fuse_file_info *fi)
 
 static int lr_release(const char *path, struct fuse_file_info *fi)
 {
-    lr_state *s = g_state;
+    (void)path;
+    lr_fh_t  *fh = (lr_fh_t *)(uintptr_t)fi->fh;
+    lr_state *s  = g_state;
+
+    /* Use the vpath captured at open time — immune to intervening rename. */
     pthread_rwlock_wrlock(&s->state_lock);
-    lr_file *f = state_find_file(s, path);
+    lr_file *f = state_find_file(s, fh->vpath);
     if (f && f->open_count > 0)
         f->open_count--;
     pthread_rwlock_unlock(&s->state_lock);
 
-    if (fi->fh != LR_DEAD_DRIVE_FH)
-        close((int)fi->fh);
+    if (fh->fd >= 0)
+        close(fh->fd);
+    free(fh);
     return 0;
 }
 
@@ -512,19 +534,22 @@ static int lr_release(const char *path, struct fuse_file_info *fi)
 static int lr_read(const char *path, char *buf, size_t size, off_t offset,
                    struct fuse_file_info *fi)
 {
-    if (fi->fh != LR_DEAD_DRIVE_FH) {
-        ssize_t n = pread((int)fi->fh, buf, size, offset);
+    (void)path;
+    lr_fh_t *fh = (lr_fh_t *)(uintptr_t)fi->fh;
+
+    if (fh->fd >= 0) {
+        ssize_t n = pread(fh->fd, buf, size, offset);
         if (n >= 0)
             return (int)n;
         if (errno != EIO)
             return -errno;
     }
 
-    /* EIO or dead-drive sentinel: attempt transparent recovery from parity */
+    /* EIO or dead-drive (fd == -1): attempt transparent recovery from parity */
     lr_state *s = g_state;
     pthread_rwlock_rdlock(&s->state_lock);
 
-    lr_file *f = state_find_file(s, path);
+    lr_file *f = state_find_file(s, fh->vpath);
     if (!f || !s->parity || s->parity->levels == 0) {
         pthread_rwlock_unlock(&s->state_lock);
         return -EIO;
@@ -606,8 +631,21 @@ static int lr_create(const char *path, mode_t mode,
             f->size = 0;
         }
         f->open_count++;
-        fi->fh = (uint64_t)fd;
         pthread_rwlock_unlock(&s->state_lock);
+
+        lr_fh_t *fh = malloc(sizeof(lr_fh_t));
+        if (!fh) {
+            close(fd);
+            pthread_rwlock_wrlock(&s->state_lock);
+            lr_file *f2 = state_find_file(s, path);
+            if (f2 && f2->open_count > 0)
+                f2->open_count--;
+            pthread_rwlock_unlock(&s->state_lock);
+            return -ENOMEM;
+        }
+        fh->fd = fd;
+        snprintf(fh->vpath, sizeof(fh->vpath), "%s", path);
+        fi->fh = (uint64_t)(uintptr_t)fh;
         return 0;
     }
 
@@ -669,7 +707,19 @@ static int lr_create(const char *path, mode_t mode,
 
     pthread_rwlock_unlock(&s->state_lock);
 
-    fi->fh = (uint64_t)fd;
+    lr_fh_t *fh = malloc(sizeof(lr_fh_t));
+    if (!fh) {
+        close(fd);
+        pthread_rwlock_wrlock(&s->state_lock);
+        lr_file *f2 = state_find_file(s, path);
+        if (f2 && f2->open_count > 0)
+            f2->open_count--;
+        pthread_rwlock_unlock(&s->state_lock);
+        return -ENOMEM;
+    }
+    fh->fd = fd;
+    snprintf(fh->vpath, sizeof(fh->vpath), "%s", path);
+    fi->fh = (uint64_t)(uintptr_t)fh;
     return 0;
 }
 
@@ -697,13 +747,15 @@ static int lr_unlink(const char *path)
     if (block_count > 0 && s->journal)
         journal_mark_dirty_range(s->journal, pos_start, block_count);
 
-    free(f);
-
-    unlink(real);
     free_positions(&s->drives[drive_idx].pos_alloc, pos_start, block_count);
     state_rebuild_pos_index(s, drive_idx);
 
     pthread_rwlock_unlock(&s->state_lock);
+
+    /* unlink and free after releasing the lock: avoids holding wrlock
+     * during a potentially slow disk operation. */
+    unlink(real);
+    free(f);
     return 0;
 }
 
@@ -875,21 +927,30 @@ static int lr_mkdir(const char *path, mode_t mode)
 {
     lr_state *s = g_state;
 
+    /* Pre-allocate the dir record before taking the lock to avoid
+     * holding wrlock during malloc (which may block). */
+    lr_dir *d = calloc(1, sizeof(lr_dir));
+
     pthread_rwlock_wrlock(&s->state_lock);
     unsigned drive_idx = state_pick_drive(s);
     if (drive_idx >= s->drive_count) {
         pthread_rwlock_unlock(&s->state_lock);
+        free(d);
         return -ENOSPC;
     }
     char real[PATH_MAX];
     real_path_on_drive(s, drive_idx, path, real, sizeof(real));
-    pthread_rwlock_unlock(&s->state_lock);
 
-    if (mkdir(real, mode) != 0)
-        return -errno;
+    /* Keep wrlock held through mkdir: prevents a concurrent lr_mkdir for the
+     * same path from inserting a duplicate dir_table entry. */
+    if (mkdir(real, mode) != 0) {
+        int saved = errno;
+        pthread_rwlock_unlock(&s->state_lock);
+        free(d);
+        return -saved;
+    }
 
     /* Record directory metadata in dir_table */
-    lr_dir *d = calloc(1, sizeof(lr_dir));
     if (d) {
         snprintf(d->vpath, PATH_MAX, "%s", path);
         struct stat st;
@@ -902,11 +963,10 @@ static int lr_mkdir(const char *path, mode_t mode)
         } else {
             d->mode = S_IFDIR | (mode & 07777);
         }
-        pthread_rwlock_wrlock(&s->state_lock);
         state_insert_dir(s, d);
-        pthread_rwlock_unlock(&s->state_lock);
     }
 
+    pthread_rwlock_unlock(&s->state_lock);
     return 0;
 }
 
@@ -1239,21 +1299,23 @@ static int lr_flush(const char *path, struct fuse_file_info *fi)
 static int lr_fsync(const char *path, int datasync,
                     struct fuse_file_info *fi)
 {
-    lr_state *s = g_state;
+    (void)path;
+    lr_fh_t  *fh = (lr_fh_t *)(uintptr_t)fi->fh;
+    lr_state *s  = g_state;
     (void)datasync;
 
-    if (fi->fh == LR_DEAD_DRIVE_FH)
+    if (fh->fd < 0)
         return -EIO;
 
     /* Sync the real file data first */
-    if (fdatasync((int)fi->fh) != 0)
+    if (fdatasync(fh->fd) != 0)
         return -errno;
 
     /* Also flush any dirty parity positions for this file so the caller's
      * durability guarantee extends to parity as well. */
     if (s->journal) {
         pthread_rwlock_rdlock(&s->state_lock);
-        lr_file *f = state_find_file(s, path);
+        lr_file *f = state_find_file(s, fh->vpath);
         uint32_t pos_start  = f ? f->parity_pos_start : 0;
         uint32_t block_count = f ? f->block_count      : 0;
         pthread_rwlock_unlock(&s->state_lock);
@@ -1272,19 +1334,22 @@ static int lr_fsync(const char *path, int datasync,
 static int lr_write2(const char *path, const char *buf, size_t size,
                      off_t offset, struct fuse_file_info *fi)
 {
-    if (fi->fh == LR_DEAD_DRIVE_FH)
+    (void)path;
+    lr_fh_t *fh = (lr_fh_t *)(uintptr_t)fi->fh;
+
+    if (fh->fd < 0)
         return -EIO;
 
     lr_state *s = g_state;
 
-    ssize_t n = pwrite((int)fi->fh, buf, size, offset);
+    ssize_t n = pwrite(fh->fd, buf, size, offset);
     if (n < 0)
         return -errno;
 
     int64_t new_end = (int64_t)(offset + n);
 
     pthread_rwlock_wrlock(&s->state_lock);
-    lr_file *f = state_find_file(s, path);
+    lr_file *f = state_find_file(s, fh->vpath);
     if (f) {
         uint32_t bs         = s->cfg.block_size;
         uint32_t old_blocks = f->block_count;
@@ -1300,7 +1365,7 @@ static int lr_write2(const char *path, const char *buf, size_t size,
                     /* Write succeeded but parity namespace exhausted;
                      * leave block_count = 0 (no parity coverage). */
                     fprintf(stderr, "liveraid: parity namespace exhausted for %s\n",
-                            path);
+                            fh->vpath);
                 } else {
                     f->parity_pos_start = new_pos;
                     dirty_start = f->parity_pos_start;
@@ -1321,7 +1386,7 @@ static int lr_write2(const char *path, const char *buf, size_t size,
                     f->block_count = 0;
                     state_rebuild_pos_index(s, f->drive_idx);
                     fprintf(stderr, "liveraid: parity namespace exhausted for %s\n",
-                            path);
+                            fh->vpath);
                 } else {
                     f->parity_pos_start = new_pos;
                     dirty_start = f->parity_pos_start;
@@ -1377,6 +1442,7 @@ static void lr_destroy(void *private_data)
     }
 
     metadata_save(s);
+    s->metadata_saved = 1;
 
     if (s->parity) {
         parity_close(s->parity);

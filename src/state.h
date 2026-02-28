@@ -103,6 +103,10 @@ typedef struct lr_state {
 
     /* Control server (Unix domain socket for live rebuild), NULL if not started */
     struct lr_ctrl   *ctrl;
+
+    /* Set to 1 by lr_destroy after metadata_save; prevents duplicate save
+     * in the post-fuse_main cleanup block in main(). */
+    int               metadata_saved;
 } lr_state;
 
 extern lr_state *g_state;

@@ -130,6 +130,14 @@ Use repair after a crash (to fix positions written after the last bitmap save)
 or after adding a new parity level (to initialize the new parity file from
 existing data).
 
+**Implementation note:** `parity_scrub` reads each data block and the
+corresponding parity blocks while holding `state_lock` as a read lock, but
+releases it between positions. This means a concurrent write can update a
+parity position after it has been checked; such a position will not be
+reported as mismatched even if it was stale at the time the scrub began.
+This is an intentional design trade-off: holding the lock for the entire scrub
+would block all writes.
+
 Both operations are also available via the control socket while mounted.
 The socket path is `<first_content_path>.ctrl`:
 
@@ -172,11 +180,11 @@ gracefully at the file level:
 
 **Read-only access (transparent):** If `open(2)` on the real file fails with
 `ENOENT`, `EIO`, or `ENXIO`, and the file was opened `O_RDONLY`, and parity is
-configured, `lr_open` stores the sentinel value `LR_DEAD_DRIVE_FH` in the file
-handle and returns success. Subsequent `read` calls skip the `pread` entirely
-and go straight to the parity recovery path described above. No error is ever
-returned to the calling application; it reads the file as if the drive were
-healthy.
+configured, `lr_open` allocates an `lr_fh_t` with `fd = -1` and stores its
+pointer in `fi->fh`, then returns success. Subsequent `read` calls detect
+`fh->fd == -1` and go straight to the parity recovery path described above.
+No error is ever returned to the calling application; it reads the file as if
+the drive were healthy.
 
 **Metadata (mode/uid/gid/mtime):** When the real file is not accessible,
 `lr_getattr` returns the stored mode, uid, gid, and mtime from the content
@@ -237,9 +245,12 @@ every 5 minutes so the file table is not stale after an unclean shutdown.
 
 Alongside each periodic metadata save, the in-memory dirty-position bitmap is
 written to `<first_content_path>.bitmap` (binary: `LRBM` magic, word count,
-uint64 array). On clean unmount the bitmap file is deleted. On unclean remount,
-if the file is present, the stored bits are OR-merged into the fresh bitmap so
-stale parity positions are recomputed by the background worker.
+uint64 array). The array is written in host byte order and is not portable
+across machines with different endianness; it is intended only for crash
+recovery on the same host. On clean unmount the bitmap file is deleted. On
+unclean remount, if the file is present, the stored bits are OR-merged into
+the fresh bitmap so stale parity positions are recomputed by the background
+worker.
 
 ## Source Layout
 
@@ -263,7 +274,7 @@ liveraid/
     ├── metadata.h/c    # Content-file load/save (atomic write, CRC32)
     │                   # 11-field format with mode/uid/gid; backward-compat load
     ├── fuse_ops.h/c    # FUSE3 high-level operation callbacks
-    │                   # Dead-drive sentinel (LR_DEAD_DRIVE_FH) in open/read/write
+    │                   # lr_fh_t per-open struct (fd + vpath) in fi->fh
     ├── parity.h/c      # Parity file I/O, ISA-L encode/recover wrappers,
     │                   # lr_alloc_vector, parity_update_position,
     │                   # parity_recover_block (multi-drive), parity_scrub
