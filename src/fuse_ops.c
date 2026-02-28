@@ -941,6 +941,9 @@ static int lr_mkdir(const char *path, mode_t mode)
     char real[PATH_MAX];
     real_path_on_drive(s, drive_idx, path, real, sizeof(real));
 
+    /* Ensure parent directories exist on this drive before mkdir. */
+    mkdirs_p(s, drive_idx, real);
+
     /* Keep wrlock held through mkdir: prevents a concurrent lr_mkdir for the
      * same path from inserting a duplicate dir_table entry. */
     if (mkdir(real, mode) != 0) {
