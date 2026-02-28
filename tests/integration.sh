@@ -19,8 +19,13 @@
 #   7. Crash recovery: kill -9, content file persists, parity clean after remount
 #   8. Multiple content paths: both written on save, secondary used when primary missing
 #   9. Empty files: size=0 created and survives remount
+#  10. Directory metadata: chmod and utimens persist across remount
+#  11. Control socket: scrub and scrub repair return 0 mismatches
+#  12. Position reuse: parity position freed by unlink is reused by next alloc
+#  13. Placement policies: mostfree, lfs, pfrd smoke test (8 files + parity clean)
 #
-# All tests use 4 drives + 2 parity levels + parity_threads=4.
+# Tests 1-9 use 4 drives + 2 parity levels + parity_threads=4.
+# Tests 10-13 use various configs as noted inline.
 # Drives and parity are created under /tmp/lrt/ and cleaned up after each test.
 
 set -euo pipefail
@@ -340,6 +345,156 @@ unmount_fs; mount_fs
 sz=$(stat -c '%s' $MNT/empty.txt)
 [ "$sz" = "0" ] && pass "empty file: size=0 after remount" || fail "empty file" "size=$sz after remount"
 unmount_fs
+
+# ===================================================================
+echo ""
+echo "=== Directory metadata: chmod and utimens ==="
+wipe_data
+mount_fs
+
+mkdir $MNT/mdtest
+chmod 750 $MNT/mdtest
+mode=$(stat -c '%a' $MNT/mdtest)
+[ "$mode" = "750" ] && pass "dir metadata: mode=750 after chmod" || fail "dir metadata" "mode=$mode"
+
+touch -d "2024-06-01 00:00:00 UTC" $MNT/mdtest
+mtime_set=$(stat -c '%Y' $MNT/mdtest)
+unmount_fs; mount_fs
+
+mode=$(stat -c '%a' $MNT/mdtest)
+[ "$mode" = "750" ] && pass "dir metadata: chmod survives remount" || fail "dir metadata" "mode=$mode after remount"
+
+mtime_got=$(stat -c '%Y' $MNT/mdtest)
+[ "$mtime_set" = "$mtime_got" ] \
+    && pass "dir metadata: utimens survives remount" \
+    || fail "dir metadata" "set=$mtime_set got=$mtime_got"
+unmount_fs
+
+# ===================================================================
+echo ""
+echo "=== Socket: scrub and scrub repair ==="
+wipe_data
+mount_fs
+
+for i in $(seq 1 5); do printf "scrub data %d" "$i" > $MNT/sd${i}.txt; done
+sleep 11  # drain parity
+
+ctrl=/tmp/lrt/content/liveraid.content.ctrl
+scrub_result=$(python3 -c "
+import socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('$ctrl')
+s.sendall(b'scrub\n')
+data = b''
+while True:
+    chunk = s.recv(4096)
+    if not chunk: break
+    data += chunk
+print(data.decode().strip())
+")
+echo "  scrub: $scrub_result"
+echo "$scrub_result" | grep -qP "^done \d+ 0 errors=0$" \
+    && pass "socket scrub: 0 mismatches" \
+    || fail "socket scrub" "$scrub_result"
+
+repair_result=$(python3 -c "
+import socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('$ctrl')
+s.sendall(b'scrub repair\n')
+data = b''
+while True:
+    chunk = s.recv(4096)
+    if not chunk: break
+    data += chunk
+print(data.decode().strip())
+")
+echo "  scrub repair: $repair_result"
+echo "$repair_result" | grep -qP "^done \d+ 0 fixed=0 errors=0$" \
+    && pass "socket scrub repair: 0 mismatches, 0 fixed" \
+    || fail "socket scrub repair" "$repair_result"
+unmount_fs
+
+# ===================================================================
+echo ""
+echo "=== Position reuse after delete ==="
+wipe_data
+# Single-drive config so both files share the same per-drive position allocator
+cat > /tmp/lrt/single.conf << 'CONFEOF'
+data d1 /tmp/lrt/d1
+parity 1 /tmp/lrt/parity1/liveraid.parity
+content /tmp/lrt/content/liveraid.content
+mountpoint /tmp/lrt/mount
+blocksize 64
+placement roundrobin
+parity_threads 1
+CONFEOF
+
+$BIN -c /tmp/lrt/single.conf -f $MNT >>/tmp/lrt/liveraid.log 2>&1 &
+sleep 1.5
+if ! grep -q lrt /proc/mounts; then
+    echo "ERROR: mount failed"; tail -5 /tmp/lrt/liveraid.log; exit 1
+fi
+
+printf "x" > $MNT/pos_a.txt   # allocates 1 block at position 0 on d1
+rm $MNT/pos_a.txt              # frees position 0 back to d1 allocator (first-fit)
+printf "x" > $MNT/pos_b.txt   # should reuse position 0
+unmount_fs
+
+pos=$(grep "|/pos_b.txt|" /tmp/lrt/content/liveraid.content | cut -d'|' -f5)
+echo "  pos_b.txt at parity position $pos"
+[ "$pos" = "0" ] \
+    && pass "position reuse: freed position reused by next allocation" \
+    || fail "position reuse" "pos=$pos (expected 0)"
+
+# ===================================================================
+echo ""
+echo "=== Placement policy smoke tests (mostfree, lfs, pfrd) ==="
+for placement in mostfree lfs pfrd; do
+    wipe_data
+    > /tmp/lrt/liveraid.log
+    cat > /tmp/lrt/pl_${placement}.conf << EOF
+data d1 /tmp/lrt/d1
+data d2 /tmp/lrt/d2
+data d3 /tmp/lrt/d3
+data d4 /tmp/lrt/d4
+parity 1 /tmp/lrt/parity1/liveraid.parity
+parity 2 /tmp/lrt/parity2/liveraid.parity
+content /tmp/lrt/content/liveraid.content
+mountpoint /tmp/lrt/mount
+blocksize 64
+placement ${placement}
+parity_threads 4
+EOF
+
+    $BIN -c /tmp/lrt/pl_${placement}.conf -f $MNT >>/tmp/lrt/liveraid.log 2>&1 &
+    sleep 1.5
+    if ! grep -q lrt /proc/mounts; then
+        fail "placement $placement" "mount failed"; continue
+    fi
+
+    all_ok=1
+    for i in $(seq 1 8); do
+        printf "placement %s file %d" "$placement" "$i" > $MNT/pl${i}.txt
+        val=$(cat $MNT/pl${i}.txt)
+        [ "$val" = "placement $placement file $i" ] || { all_ok=0; break; }
+    done
+    [ "$all_ok" = "1" ] && pass "placement $placement: 8 files written and read back" \
+                         || fail "placement $placement" "file content mismatch"
+
+    sleep 11  # drain parity
+    kill -USR2 $(pidof liveraid) 2>/dev/null || true
+    sleep 4
+    unmount_fs
+
+    result=$(grep "repair:" /tmp/lrt/liveraid.log | tail -1 || true)
+    echo "  $placement: $result"
+    if [ -n "$result" ] && check_clean_parity "$result"; then
+        pass "placement $placement: parity clean"
+    else
+        fail "placement $placement" "$result"
+    fi
+done
 
 # ===================================================================
 echo ""
