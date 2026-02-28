@@ -1,6 +1,7 @@
 #define _GNU_SOURCE   /* for open_memstream */
 #include "metadata.h"
 #include "state.h"
+#include "alloc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,15 +94,23 @@ int metadata_load(lr_state *s)
         if (len > 0 && p[len-1] == '\n') p[len-1] = '\0';
         if (len > 1 && p[len-2] == '\r') p[len-2] = '\0';
 
-        /* Skip comments/empty */
+        /* Parse known header directives before skipping all '#' lines */
+        if (strncmp(p, "# next_free_pos:", 16) == 0) {
+            uint32_t nfp = (uint32_t)strtoul(p + 16, NULL, 10);
+            if (nfp > s->pos_alloc.next_free)
+                s->pos_alloc.next_free = nfp;
+            continue;
+        }
+        if (strncmp(p, "# free_extent:", 14) == 0) {
+            uint32_t start, count;
+            if (sscanf(p + 14, "%u %u", &start, &count) == 2)
+                free_positions(&s->pos_alloc, start, count);
+            continue;
+        }
+
+        /* Skip remaining comments/empty lines */
         if (p[0] == '#' || p[0] == '\0')
             continue;
-
-        /* Parse header lines */
-        if (strncmp(p, "# blocksize:", 12) == 0)
-            continue; /* informational only */
-        if (strncmp(p, "# next_free_pos:", 16) == 0)
-            continue; /* we compute from files */
 
         /* File records: file|DRIVE|VPATH|SIZE|POS_START|BLOCKS|MTIME_SEC|MTIME_NSEC */
         if (strncmp(p, "file|", 5) != 0)
@@ -236,6 +245,10 @@ static int write_to_path(lr_state *s, const char *path)
     fprintf(mf, "# version: %d\n", META_VERSION);
     fprintf(mf, "# blocksize: %u\n", s->cfg.block_size);
     fprintf(mf, "# next_free_pos: %u\n", s->pos_alloc.next_free);
+    for (uint32_t i = 0; i < s->pos_alloc.ext_count; i++)
+        fprintf(mf, "# free_extent: %u %u\n",
+                s->pos_alloc.extents[i].start,
+                s->pos_alloc.extents[i].count);
 
     lr_list_node *node = lr_list_head(&s->file_list);
     while (node) {

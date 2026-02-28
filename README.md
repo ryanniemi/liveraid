@@ -451,11 +451,10 @@ Runtime dependencies: `libfuse3`, `libisal`. No external source trees required.
   (or remount) is needed to recover them.
 
 **Allocator**
-- Freed positions are recycled within a session via a sorted free-extent list
-  with first-fit allocation and neighbor merging. However, the extent list is
-  not persisted — freed ranges from deleted files are lost on remount, so
-  `next_free` only ever grows across sessions. The parity file is never
-  truncated.
+- Free extents are persisted in the content file as `# free_extent:` header
+  lines and restored on remount, so deleted files' positions are reused across
+  sessions. The parity file is never truncated; its size is bounded by the
+  high-water mark of positions ever allocated.
 
 ## License
 
