@@ -58,10 +58,16 @@ int  parity_recover_block(lr_state *s, unsigned drive_idx, uint32_t pos,
 typedef struct {
     uint32_t positions_checked;
     uint32_t parity_mismatches;
+    uint32_t parity_fixed;
     uint32_t read_errors;
 } lr_scrub_result;
 
-int  parity_scrub(lr_state *s, lr_scrub_result *result);
+/*
+ * Walk every parity position and verify stored parity matches recomputed.
+ * If repair != 0, overwrite any mismatched parity blocks with the correct
+ * values (use this after adding a new parity level or after a crash).
+ */
+int  parity_scrub(lr_state *s, lr_scrub_result *result, int repair);
 
 /* ------------------------------------------------------------------ */
 /* Vector allocator                                                     */

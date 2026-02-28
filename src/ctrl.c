@@ -1,6 +1,7 @@
 #include "ctrl.h"
 #include "state.h"
 #include "parity.h"
+#include "journal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -244,6 +245,35 @@ static void live_do_rebuild(lr_ctrl *c, int conn, const char *drive_name)
 }
 
 /*--------------------------------------------------------------------
+ * Run a scrub or repair pass and stream the result to conn.
+ * repair=0: verify only; repair=1: verify and fix mismatched parity.
+ *------------------------------------------------------------------*/
+static void live_do_scrub(lr_ctrl *c, int conn, int repair)
+{
+    lr_state *s = c->state;
+
+    if (!s->parity || s->parity->levels == 0) {
+        ctrl_send(conn, "error no parity configured\n");
+        return;
+    }
+
+    lr_scrub_result result;
+    parity_scrub(s, &result, repair);
+
+    if (repair)
+        ctrl_send(conn, "done %u %u fixed=%u errors=%u\n",
+                  result.positions_checked,
+                  result.parity_mismatches,
+                  result.parity_fixed,
+                  result.read_errors);
+    else
+        ctrl_send(conn, "done %u %u errors=%u\n",
+                  result.positions_checked,
+                  result.parity_mismatches,
+                  result.read_errors);
+}
+
+/*--------------------------------------------------------------------
  * Handle one connection: read command line, dispatch.
  *------------------------------------------------------------------*/
 static void handle_connection(lr_ctrl *c, int conn)
@@ -270,6 +300,10 @@ static void handle_connection(lr_ctrl *c, int conn)
 
     if (strncmp(line, "rebuild ", 8) == 0)
         live_do_rebuild(c, conn, line + 8);
+    else if (strcmp(line, "scrub repair") == 0)
+        live_do_scrub(c, conn, 1);
+    else if (strcmp(line, "scrub") == 0)
+        live_do_scrub(c, conn, 0);
     else
         ctrl_send(conn, "error unknown command\n");
 }

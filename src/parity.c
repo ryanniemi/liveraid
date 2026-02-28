@@ -348,7 +348,7 @@ int parity_recover_block(lr_state *s, unsigned drive_idx, uint32_t pos,
 /* Scrub                                                                */
 /* ------------------------------------------------------------------ */
 
-int parity_scrub(lr_state *s, lr_scrub_result *result)
+int parity_scrub(lr_state *s, lr_scrub_result *result, int repair)
 {
     memset(result, 0, sizeof(*result));
 
@@ -361,7 +361,7 @@ int parity_scrub(lr_state *s, lr_scrub_result *result)
 
     /*
      * Allocate: nd data + np computed-parity + np stored-parity slots.
-     * raid_gen writes into v[nd..nd+np-1]; stored parity goes into
+     * ec_encode_data writes into v[nd..nd+np-1]; stored parity goes into
      * v[nd+np..nd+2*np-1] for byte-for-byte comparison.
      */
     void *freeptr = NULL;
@@ -419,7 +419,7 @@ int parity_scrub(lr_state *s, lr_scrub_result *result)
                        (uint8_t **)v + nd);
 
         /* Read stored parity into v[nd+np..nd+2*np-1] and compare */
-        int mismatch       = 0;
+        int mismatch        = 0;
         int parity_read_err = 0;
         for (unsigned p = 0; p < np; p++) {
             if (parity_read_block(s->parity, p, pos, v[nd + np + p]) != 0) {
@@ -430,10 +430,20 @@ int parity_scrub(lr_state *s, lr_scrub_result *result)
                 mismatch = 1;
         }
 
-        if (parity_read_err)
+        if (parity_read_err) {
             result->read_errors++;
-        else if (mismatch)
+        } else if (mismatch) {
             result->parity_mismatches++;
+            if (repair) {
+                int write_err = 0;
+                for (unsigned p = 0; p < np; p++) {
+                    if (parity_write_block(s->parity, p, pos, v[nd + p]) != 0)
+                        write_err = 1;
+                }
+                if (!write_err)
+                    result->parity_fixed++;
+            }
+        }
     }
 
     free(freeptr);

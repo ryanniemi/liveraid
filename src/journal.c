@@ -258,17 +258,28 @@ static void *worker_thread(void *arg)
             }
         }
 
-        /* Scrub if requested */
-        if (j->scrub_pending) {
-            j->scrub_pending = 0;
+        /* Scrub / repair if requested */
+        if (j->repair_pending || j->scrub_pending) {
+            int do_repair    = j->repair_pending;
+            j->scrub_pending  = 0;
+            j->repair_pending = 0;
             lr_scrub_result result;
-            parity_scrub(s, &result);
-            fprintf(stderr,
-                    "scrub: %u positions checked, "
-                    "%u parity mismatches, %u read errors\n",
-                    result.positions_checked,
-                    result.parity_mismatches,
-                    result.read_errors);
+            parity_scrub(s, &result, do_repair);
+            if (do_repair)
+                fprintf(stderr,
+                        "repair: %u positions checked, "
+                        "%u mismatches, %u fixed, %u read errors\n",
+                        result.positions_checked,
+                        result.parity_mismatches,
+                        result.parity_fixed,
+                        result.read_errors);
+            else
+                fprintf(stderr,
+                        "scrub: %u positions checked, "
+                        "%u parity mismatches, %u read errors\n",
+                        result.positions_checked,
+                        result.parity_mismatches,
+                        result.read_errors);
         }
     }
 
@@ -354,6 +365,14 @@ void journal_set_bitmap_path(lr_journal *j, const char *path)
 void journal_scrub_request(lr_journal *j)
 {
     j->scrub_pending = 1;
+    pthread_mutex_lock(&j->bitmap_lock);
+    pthread_cond_signal(&j->wake_cond);
+    pthread_mutex_unlock(&j->bitmap_lock);
+}
+
+void journal_repair_request(lr_journal *j)
+{
+    j->repair_pending = 1;
     pthread_mutex_lock(&j->bitmap_lock);
     pthread_cond_signal(&j->wake_cond);
     pthread_mutex_unlock(&j->bitmap_lock);

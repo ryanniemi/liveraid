@@ -39,8 +39,9 @@ typedef struct lr_journal {
     /* Persistent crash journal */
     char            bitmap_path[PATH_MAX]; /* on-disk dirty-bitmap file; "" = disabled */
 
-    /* Scrub */
-    volatile sig_atomic_t scrub_pending; /* set by SIGUSR1 handler */
+    /* Scrub / repair */
+    volatile sig_atomic_t scrub_pending;  /* set by SIGUSR1 handler */
+    volatile sig_atomic_t repair_pending; /* set by SIGUSR2 handler */
 
     struct lr_state *state;
 } lr_journal;
@@ -62,5 +63,10 @@ void journal_set_bitmap_path(lr_journal *j, const char *path);
 
 /* Request a full parity scrub (also triggerable via SIGUSR1). */
 void journal_scrub_request(lr_journal *j);
+
+/* Request a full parity repair/resync (also triggerable via SIGUSR2).
+ * Like scrub, but overwrites any mismatched parity with correct values.
+ * Use after adding a new parity level or to fix parity after a crash. */
+void journal_repair_request(lr_journal *j);
 
 #endif /* LR_JOURNAL_H */

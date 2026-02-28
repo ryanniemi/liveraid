@@ -60,7 +60,7 @@ storage where total array loss is a worse outcome than partial file loss.
 - **Offline rebuild**: `./liveraid rebuild -c CONFIG -d DRIVE_NAME` reconstructs all files on a replaced drive from parity, restoring permissions and timestamps
 - **Live rebuild**: if the filesystem is mounted, `liveraid rebuild` automatically connects via a Unix domain socket and rebuilds without unmounting; files currently open are skipped and reported
 - **Crash-consistent journal**: dirty bitmap saved to disk periodically; restored on unclean remount
-- **Scrub**: `kill -USR1 <pid>` triggers a full parity-vs-data verification pass
+- **Scrub**: `kill -USR1 <pid>` verifies parity against data; `kill -USR2 <pid>` repairs any mismatches
 - **Persistent metadata**: content file saved atomically on unmount and every 5 min
 - **CRC32 integrity**: content file footer detects corruption at load time
 - **Drive selection**: `mostfree` (default) or `roundrobin`
@@ -137,15 +137,20 @@ mountpoint /srv/array
 # Unmount
 fusermount3 -u /srv/array
 
-# Trigger a scrub (verify parity against data, results to stderr)
+# Verify parity (read-only, reports mismatches to stderr)
 kill -USR1 $(pidof liveraid)
 
-# Rebuild a replaced drive from parity
-# If the filesystem is mounted, rebuild runs live (no unmount required)
+# Repair parity (rewrite any mismatched blocks — use after a crash or after
+# adding a new parity level)
+kill -USR2 $(pidof liveraid)
+
+# Rebuild a replaced drive from parity.
+# Automatically runs live (via socket) if mounted, offline otherwise.
 ./liveraid rebuild -c /etc/liveraid.conf -d 1
 
-# If the filesystem is not mounted, rebuild runs offline from parity
-./liveraid rebuild -c /etc/liveraid.conf -d 1
+# Scrub/repair via control socket (filesystem must be mounted)
+echo "scrub"        | nc -U /var/lib/liveraid/liveraid.content.ctrl
+echo "scrub repair" | nc -U /var/lib/liveraid/liveraid.content.ctrl
 ```
 
 Standard FUSE options (`-d`, `-s`, `-o allow_other`, etc.) are passed through.
@@ -234,9 +239,9 @@ save interval (5 minutes). Positions written after the last periodic save but
 before the crash are not recorded and will have silently stale parity; running
 a scrub after remount detects them.
 
-### Scrub
+### Scrub and repair
 
-Send `SIGUSR1` to the mounted process to request a scrub:
+**Scrub** (`SIGUSR1`) verifies parity without modifying anything:
 
 ```sh
 kill -USR1 $(pidof liveraid)
@@ -252,9 +257,31 @@ printed to stderr:
 scrub: 4096 positions checked, 0 parity mismatches, 0 read errors
 ```
 
-A non-zero mismatch count means parity is stale for those positions (e.g.,
-after a crash). Re-triggering a write (or calling `parity_update_position`
-directly) corrects them; future recovery will then produce correct data.
+**Repair** (`SIGUSR2`) does the same walk but overwrites any mismatched parity
+blocks with the correct values:
+
+```sh
+kill -USR2 $(pidof liveraid)
+```
+
+```
+repair: 4096 positions checked, 12 mismatches, 12 fixed, 0 read errors
+```
+
+Use repair after a crash (to fix positions written after the last bitmap save)
+or after adding a new parity level (to initialize the new parity file from
+existing data).
+
+Both operations are also available via the control socket while mounted.
+The socket path is `<first_content_path>.ctrl`:
+
+```sh
+echo "scrub"        | nc -U /var/lib/liveraid/liveraid.content.ctrl
+echo "scrub repair" | nc -U /var/lib/liveraid/liveraid.content.ctrl
+```
+
+Socket response: `done CHECKED MISMATCHES errors=N` (scrub) or
+`done CHECKED MISMATCHES fixed=N errors=N` (repair).
 
 ### Read recovery
 
@@ -277,8 +304,8 @@ Recovery is attempted block-by-block across the full read range; partial data
 already assembled is returned if a later block cannot be recovered.
 
 **Precondition:** parity must be current for the affected positions. Parity is
-guaranteed current after a clean unmount; after a crash, running a scrub
-(`kill -USR1`) identifies any positions with stale parity.
+guaranteed current after a clean unmount; after a crash, run a repair
+(`kill -USR2`) to rewrite any stale positions before relying on recovery.
 
 ### Drive failure handling
 
@@ -366,6 +393,54 @@ rebuild: complete — 2 rebuilt, 1 failed
 After a successful rebuild, remount (if needed) — the drive is fully
 operational.
 
+### Array management
+
+#### Adding a data drive
+
+1. Register the new drive in the config: `data N /mnt/diskN/`
+2. Unmount and remount. New files will be placed on the new drive according to
+   the placement policy; existing files are unaffected.
+
+#### Removing a data drive
+
+All files on the drive must be vacated before removing it from the config.
+The content file stores drive names, so any file whose drive name is absent
+from the config will be silently dropped on load.
+
+There is no built-in drive-drain command. The safest procedure:
+
+1. Copy the files to a location outside the array.
+2. Delete them from the array through the FUSE mount (this keeps parity current).
+3. Copy them back into the array through the FUSE mount (they will land on
+   other drives according to the placement policy).
+4. Verify no files remain on the drive.
+5. Unmount, remove the `data` line from the config, remount.
+
+If the drive has failed and its data is unrecoverable, use `rebuild` to
+reconstruct the files onto remaining drives (see [Rebuild](#rebuild) above),
+then remove the dead drive from the config.
+
+#### Adding a parity level
+
+1. Add the new parity line to the config: `parity N /mnt/parityN/liveraid.parity`
+   Levels must remain contiguous from 1, so add the next level in sequence.
+2. Unmount and remount. The new parity file starts empty (all zeros).
+3. Run a repair pass to initialize it from existing data:
+   ```sh
+   kill -USR2 $(pidof liveraid)
+   ```
+   Wait for the repair to complete (watch stderr for the `repair: … fixed=…`
+   line) before relying on the new parity level for recovery.
+
+#### Removing a parity level
+
+Only the highest-numbered level can be removed (levels must remain contiguous).
+
+1. Unmount.
+2. Remove the highest `parity N` line from the config.
+3. Remount. The unused parity file can be deleted or left in place; it will not
+   be opened or written.
+
 ### Metadata
 
 On unmount (FUSE `destroy` callback), after `journal_flush` completes, the
@@ -409,7 +484,7 @@ liveraid/
 ├── liveraid.conf.example
 └── src/
     ├── main.c          # Entry point: arg parse, rebuild dispatch,
-    │                   # init sequence, SIGUSR1 handler, fuse_main
+    │                   # init sequence, SIGUSR1/USR2 handlers, fuse_main
     ├── config.h/c      # INI-style config parser
     ├── state.h/c       # In-memory state, file table (lr_hash),
     │                   # file list (lr_list), drive selection,
@@ -431,7 +506,7 @@ liveraid/
     ├── rebuild.h/c     # Drive rebuild from parity
     │                   # (try_live_rebuild via ctrl socket; offline fallback)
     └── ctrl.h/c        # Unix domain socket control server
-                        # (live rebuild without unmounting; open_count busy-skip)
+                        # (live rebuild, scrub, repair; open_count busy-skip)
 ```
 
 Runtime dependencies: `libfuse3`, `libisal`. No external source trees required.
@@ -440,14 +515,14 @@ Runtime dependencies: `libfuse3`, `libisal`. No external source trees required.
 
 **Parity / recovery**
 - Crash recovery is best-effort: the dirty bitmap is saved every 5 minutes
-  (configurable via `save_interval_s` in the source). Writes in the window
+  (hardcoded; not currently a config option). Writes in the window
   between two saves are not recorded; after a crash those positions may have
   stale parity that is not flagged for recomputation. A clean unmount always
   flushes parity and deletes the bitmap file.
 - Read recovery requires parity to be current for the affected position. A
   crash before the background sweep can leave parity stale, resulting in
-  silently wrong recovered data. A post-crash scrub (`kill -USR1`) detects
-  such mismatches.
+  silently wrong recovered data. A post-crash repair (`kill -USR2`) detects
+  and fixes such mismatches.
 - Multi-drive recovery is limited to *np* simultaneous failures (one per
   configured parity level). With a single parity file, at most one drive can
   be reconstructed at a time.

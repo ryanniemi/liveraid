@@ -18,12 +18,20 @@
 #include <getopt.h>
 #include <signal.h>
 
-/* SIGUSR1 handler: request a scrub pass */
+/* SIGUSR1 handler: request a scrub pass (verify parity, report mismatches) */
 static void sigusr1_handler(int sig)
 {
     (void)sig;
     if (g_state && g_state->journal)
         g_state->journal->scrub_pending = 1;
+}
+
+/* SIGUSR2 handler: request a repair pass (verify and fix mismatched parity) */
+static void sigusr2_handler(int sig)
+{
+    (void)sig;
+    if (g_state && g_state->journal)
+        g_state->journal->repair_pending = 1;
 }
 
 static void usage(const char *prog)
@@ -39,6 +47,11 @@ static void usage(const char *prog)
         "  -d           Enable FUSE debug output\n"
         "  -f           Run in foreground\n"
         "  -V           Print version and exit\n"
+        "\n"
+        "Signals (send to mounted process):\n"
+        "  SIGUSR1      Verify parity — report mismatches, do not fix\n"
+        "  SIGUSR2      Repair parity — rewrite any mismatched parity blocks\n"
+        "               (also use after adding a new parity level)\n"
         "\n"
         "Example:\n"
         "  %s -c /etc/liveraid.conf /mnt/array\n",
@@ -183,6 +196,8 @@ int main(int argc, char *argv[])
         memset(&sa, 0, sizeof(sa));
         sa.sa_handler = sigusr1_handler;
         sigaction(SIGUSR1, &sa, NULL);
+        sa.sa_handler = sigusr2_handler;
+        sigaction(SIGUSR2, &sa, NULL);
     }
 
     /* ---- Run FUSE ---- */
