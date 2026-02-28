@@ -119,7 +119,7 @@ mountpoint /srv/array
 | Directive | Required | Description |
 |-----------|----------|-------------|
 | `data NAME DIR` | yes (≥1) | Register a data drive. `NAME` is used in the content file; `DIR` is the real path on disk. |
-| `parity N PATH` | no | Parity file for level N (1–6). Levels must be contiguous starting from 1. Level 1 recovers 1 failed drive; each additional level recovers one more. |
+| `parity LEVEL PATH` | no | Parity file for the given level (1–6). Levels must be contiguous starting from 1. Level 1 recovers 1 failed drive; each additional level recovers one more. |
 | `content PATH` | yes (≥1) | Where to save file metadata. List multiple paths for redundancy (all are written on save, first found is loaded). |
 | `mountpoint PATH` | yes | FUSE mount point. |
 | `blocksize KiB` | no | Parity block size in KiB (default 256). Must be a multiple of 64 bytes. |
