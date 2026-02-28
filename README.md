@@ -84,7 +84,8 @@ make
 The binary `liveraid` is placed in the current directory.
 
 ```sh
-make clean   # remove objects and binary
+make test    # build and run the unit test suite
+make clean   # remove objects, binary, and test binaries
 ```
 
 ## Configuration

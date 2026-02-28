@@ -258,6 +258,14 @@ worker.
 liveraid/
 ├── Makefile
 ├── liveraid.conf.example
+├── tests/
+│   ├── test_harness.h  # Minimal ASSERT / RUN / REPORT macros
+│   ├── test_alloc.c    # lr_pos_allocator: alloc, free, merging, extent reuse
+│   ├── test_hash.c     # lr_hash: insert/find/remove, growth, chain removal
+│   ├── test_list.c     # lr_list: insert/remove (head, tail, middle, sole)
+│   ├── test_state.c    # lr_state: file/dir CRUD, pos-index, drive selection
+│   ├── test_metadata.c # metadata_load/save: roundtrip, old format, allocator state
+│   └── test_config.c   # config_load: valid configs, error paths, defaults
 └── src/
     ├── main.c          # Entry point: arg parse, rebuild dispatch,
     │                   # init sequence, SIGUSR1/USR2 handlers, fuse_main
