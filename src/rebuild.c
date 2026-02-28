@@ -105,10 +105,9 @@ static int rebuild_one_file(lr_state *s, unsigned drive_idx, lr_file *f,
     if (f->mode & 07777)
         chmod(f->real_path, f->mode & 07777);
 
-    if (f->uid != 0 || f->gid != 0) {
-        /* Best-effort: may fail if not running as root */
-        if (lchown(f->real_path, f->uid, f->gid) != 0) {}
-    }
+    /* Best-effort: may fail if not running as root */
+    int chown_rc = lchown(f->real_path, f->uid, f->gid);
+    (void)chown_rc;
 
     if (f->mtime_sec != 0) {
         struct timespec ts[2];

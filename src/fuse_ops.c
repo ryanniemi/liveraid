@@ -300,19 +300,21 @@ static int lr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     size_t  seen_cnt = 0;
 
     /* Returns 1 if name was already seen, 0 otherwise (and adds it) */
-#define SEEN_ADD(nm) ({                                         \
-    int _found = 0;                                             \
-    for (size_t _i = 0; _i < seen_cnt; _i++) {                 \
-        if (strcmp(seen[_i], (nm)) == 0) { _found = 1; break; } \
-    }                                                           \
-    if (!_found) {                                              \
-        if (seen_cnt == seen_cap) {                             \
-            seen_cap = seen_cap ? seen_cap * 2 : 32;           \
-            seen = realloc(seen, seen_cap * sizeof(char *));    \
-        }                                                       \
-        seen[seen_cnt++] = strdup(nm);                         \
-    }                                                           \
-    _found;                                                     \
+#define SEEN_ADD(nm) ({                                              \
+    int _found = 0;                                                  \
+    for (size_t _i = 0; _i < seen_cnt; _i++) {                      \
+        if (strcmp(seen[_i], (nm)) == 0) { _found = 1; break; }     \
+    }                                                                \
+    if (!_found) {                                                   \
+        if (seen_cnt == seen_cap) {                                  \
+            size_t _nc = seen_cap ? seen_cap * 2 : 32;              \
+            char **_p = realloc(seen, _nc * sizeof(char *));         \
+            if (_p) { seen = _p; seen_cap = _nc; }                  \
+            else    { _found = 1; /* skip to avoid NULL deref */  } \
+        }                                                            \
+        if (!_found) seen[seen_cnt++] = strdup(nm);                  \
+    }                                                                \
+    _found;                                                          \
 })
 
     pthread_rwlock_rdlock(&s->state_lock);
@@ -452,8 +454,9 @@ static int lr_open(const char *path, struct fuse_file_info *fi)
     lr_state *s = g_state;
 
     /* Increment open_count before releasing the lock so the live-rebuild
-     * thread never sees open_count == 0 while we are mid-open. */
-    pthread_rwlock_rdlock(&s->state_lock);
+     * thread never sees open_count == 0 while we are mid-open.
+     * Use wrlock because open_count is a write. */
+    pthread_rwlock_wrlock(&s->state_lock);
     lr_file *f = state_find_file(s, path);
     if (!f) {
         pthread_rwlock_unlock(&s->state_lock);
@@ -481,7 +484,7 @@ static int lr_open(const char *path, struct fuse_file_info *fi)
     }
 
     /* Open failed with no recovery path — undo the open_count increment. */
-    pthread_rwlock_rdlock(&s->state_lock);
+    pthread_rwlock_wrlock(&s->state_lock);
     lr_file *f2 = state_find_file(s, path);
     if (f2 && f2->open_count > 0)
         f2->open_count--;
@@ -492,7 +495,7 @@ static int lr_open(const char *path, struct fuse_file_info *fi)
 static int lr_release(const char *path, struct fuse_file_info *fi)
 {
     lr_state *s = g_state;
-    pthread_rwlock_rdlock(&s->state_lock);
+    pthread_rwlock_wrlock(&s->state_lock);
     lr_file *f = state_find_file(s, path);
     if (f && f->open_count > 0)
         f->open_count--;
@@ -588,6 +591,19 @@ static int lr_create(const char *path, mode_t mode,
         if (fd < 0) {
             pthread_rwlock_unlock(&s->state_lock);
             return -errno;
+        }
+        /* O_TRUNC: the kernel truncated the real file; sync our metadata */
+        if ((fi->flags & O_TRUNC) && f->block_count > 0) {
+            if (s->journal)
+                journal_mark_dirty_range(s->journal,
+                                         f->parity_pos_start, f->block_count);
+            free_positions(&s->drives[f->drive_idx].pos_alloc,
+                           f->parity_pos_start, f->block_count);
+            f->block_count = 0;
+            f->size        = 0;
+            state_rebuild_pos_index(s, f->drive_idx);
+        } else if (fi->flags & O_TRUNC) {
+            f->size = 0;
         }
         f->open_count++;
         fi->fh = (uint64_t)fd;
@@ -715,8 +731,77 @@ static int lr_rename(const char *from, const char *to, unsigned int flags)
 
     lr_file *f = state_find_file(s, from);
     if (!f) {
+        /* Not a file — check if it's a directory */
+        if (!is_any_dir(s, from)) {
+            pthread_rwlock_unlock(&s->state_lock);
+            return -ENOENT;
+        }
+
+        /* RENAME_NOREPLACE: fail if destination already exists */
+        if ((flags & RENAME_NOREPLACE) && is_any_dir(s, to)) {
+            pthread_rwlock_unlock(&s->state_lock);
+            return -EEXIST;
+        }
+
+        size_t from_len = strlen(from);
+
+        /* Rename the real backing directory on each drive that has it */
+        int rc = 0;
+        for (unsigned i = 0; i < s->drive_count && rc == 0; i++) {
+            char real_from[PATH_MAX], real_to[PATH_MAX];
+            real_path_on_drive(s, i, from, real_from, sizeof(real_from));
+            real_path_on_drive(s, i, to,   real_to,   sizeof(real_to));
+            struct stat st;
+            if (lstat(real_from, &st) == 0 && S_ISDIR(st.st_mode)) {
+                if (rename(real_from, real_to) != 0)
+                    rc = -errno;
+            }
+        }
+        if (rc != 0) {
+            pthread_rwlock_unlock(&s->state_lock);
+            return rc;
+        }
+
+        /* Update all lr_file vpaths whose prefix matches from */
+        lr_list_node *node = lr_list_head(&s->file_list);
+        while (node) {
+            lr_file *file = (lr_file *)node->data;
+            node = node->next;
+            if (strncmp(file->vpath, from, from_len) == 0 &&
+                (file->vpath[from_len] == '/' || file->vpath[from_len] == '\0')) {
+                lr_hash_remove(&s->file_table, &file->vpath_node);
+                char new_vpath[PATH_MAX];
+                snprintf(new_vpath, sizeof(new_vpath), "%s%s",
+                         to, file->vpath + from_len);
+                snprintf(file->vpath, sizeof(file->vpath), "%s", new_vpath);
+                const char *rel = file->vpath[0] == '/' ? file->vpath + 1 : file->vpath;
+                snprintf(file->real_path, sizeof(file->real_path), "%s%s",
+                         s->drives[file->drive_idx].dir, rel);
+                uint32_t h = lr_hash_string(file->vpath);
+                lr_hash_insert(&s->file_table, &file->vpath_node, file, h);
+            }
+        }
+
+        /* Update all lr_dir entries whose vpath matches from or has it as prefix */
+        node = lr_list_head(&s->dir_list);
+        while (node) {
+            lr_dir *dir = (lr_dir *)node->data;
+            node = node->next;
+            if (strcmp(dir->vpath, from) == 0 ||
+                (strncmp(dir->vpath, from, from_len) == 0 &&
+                 dir->vpath[from_len] == '/')) {
+                lr_hash_remove(&s->dir_table, &dir->vpath_node);
+                char new_vpath[PATH_MAX];
+                snprintf(new_vpath, sizeof(new_vpath), "%s%s",
+                         to, dir->vpath + from_len);
+                snprintf(dir->vpath, sizeof(dir->vpath), "%s", new_vpath);
+                uint32_t h = lr_hash_string(dir->vpath);
+                lr_hash_insert(&s->dir_table, &dir->vpath_node, dir, h);
+            }
+        }
+
         pthread_rwlock_unlock(&s->state_lock);
-        return -ENOENT;
+        return 0;
     }
 
     /* Trivial self-rename */
@@ -829,13 +914,12 @@ static int lr_rmdir(const char *path)
 {
     lr_state *s = g_state;
 
-    pthread_rwlock_wrlock(&s->state_lock);
-    lr_dir *d = state_remove_dir(s, path);
+    pthread_rwlock_rdlock(&s->state_lock);
     unsigned count = s->drive_count;
     pthread_rwlock_unlock(&s->state_lock);
 
-    free(d);
-
+    /* Attempt real rmdir first: if any drive rejects it (e.g. ENOTEMPTY),
+     * don't touch the dir_table — the virtual directory still exists. */
     int rc = 0;
     for (unsigned i = 0; i < count; i++) {
         pthread_rwlock_rdlock(&s->state_lock);
@@ -845,7 +929,14 @@ static int lr_rmdir(const char *path)
         if (rmdir(real) != 0 && errno != ENOENT)
             rc = -errno;
     }
-    return rc;
+    if (rc != 0)
+        return rc;
+
+    pthread_rwlock_wrlock(&s->state_lock);
+    lr_dir *d = state_remove_dir(s, path);
+    pthread_rwlock_unlock(&s->state_lock);
+    free(d);
+    return 0;
 }
 
 /*--------------------------------------------------------------------
@@ -882,7 +973,12 @@ static int lr_truncate(const char *path, off_t size,
     if (new_blocks > old_blocks) {
         uint32_t dirty_start, dirty_count;
         if (old_blocks == 0) {
-            f->parity_pos_start = alloc_positions(pa, new_blocks);
+            uint32_t new_pos = alloc_positions(pa, new_blocks);
+            if (new_pos == UINT32_MAX) {
+                pthread_rwlock_unlock(&s->state_lock);
+                return -ENOSPC;
+            }
+            f->parity_pos_start = new_pos;
             dirty_start = f->parity_pos_start;
             dirty_count = new_blocks;
         } else if (f->parity_pos_start + old_blocks == pa->next_free) {
@@ -891,7 +987,14 @@ static int lr_truncate(const char *path, off_t size,
             pa->next_free += dirty_count;
         } else {
             free_positions(pa, f->parity_pos_start, old_blocks);
-            f->parity_pos_start = alloc_positions(pa, new_blocks);
+            uint32_t new_pos = alloc_positions(pa, new_blocks);
+            if (new_pos == UINT32_MAX) {
+                f->block_count = 0;
+                state_rebuild_pos_index(s, f->drive_idx);
+                pthread_rwlock_unlock(&s->state_lock);
+                return -ENOSPC;
+            }
+            f->parity_pos_start = new_pos;
             dirty_start = f->parity_pos_start;
             dirty_count = new_blocks;
         }
@@ -927,7 +1030,8 @@ static int lr_statfs(const char *path, struct statvfs *sv)
     unsigned count = s->drive_count;
     pthread_rwlock_unlock(&s->state_lock);
 
-    uint64_t total = 0, free_b = 0, avail = 0;
+    /* Accumulate in bytes so drives with different f_frsize are comparable */
+    uint64_t total_bytes = 0, free_bytes = 0, avail_bytes = 0;
     unsigned long bsize = 4096;
 
     for (unsigned i = 0; i < count; i++) {
@@ -938,18 +1042,19 @@ static int lr_statfs(const char *path, struct statvfs *sv)
 
         struct statvfs dsv;
         if (statvfs(dir, &dsv) == 0) {
-            bsize  = dsv.f_frsize;
-            total += dsv.f_blocks;
-            free_b += dsv.f_bfree;
-            avail  += dsv.f_bavail;
+            total_bytes += (uint64_t)dsv.f_blocks * dsv.f_frsize;
+            free_bytes  += (uint64_t)dsv.f_bfree  * dsv.f_frsize;
+            avail_bytes += (uint64_t)dsv.f_bavail  * dsv.f_frsize;
+            if (dsv.f_frsize > bsize)
+                bsize = dsv.f_frsize;
         }
     }
 
     sv->f_bsize   = bsize;
     sv->f_frsize  = bsize;
-    sv->f_blocks  = total;
-    sv->f_bfree   = free_b;
-    sv->f_bavail  = avail;
+    sv->f_blocks  = bsize ? total_bytes / bsize : 0;
+    sv->f_bfree   = bsize ? free_bytes  / bsize : 0;
+    sv->f_bavail  = bsize ? avail_bytes / bsize : 0;
     sv->f_namemax = 255;
     return 0;
 }
@@ -1141,10 +1246,8 @@ static int lr_fsync(const char *path, int datasync,
         return -EIO;
 
     /* Sync the real file data first */
-    if (fi->fh != 0) {
-        if (fdatasync((int)fi->fh) != 0)
-            return -errno;
-    }
+    if (fdatasync((int)fi->fh) != 0)
+        return -errno;
 
     /* Also flush any dirty parity positions for this file so the caller's
      * durability guarantee extends to parity as well. */
@@ -1192,21 +1295,41 @@ static int lr_write2(const char *path, const char *buf, size_t size,
         lr_pos_allocator *pa = &s->drives[f->drive_idx].pos_alloc;
         if (new_blocks > old_blocks) {
             if (old_blocks == 0) {
-                f->parity_pos_start = alloc_positions(pa, new_blocks);
-                dirty_start = f->parity_pos_start;
-                dirty_count = new_blocks;
+                uint32_t new_pos = alloc_positions(pa, new_blocks);
+                if (new_pos == UINT32_MAX) {
+                    /* Write succeeded but parity namespace exhausted;
+                     * leave block_count = 0 (no parity coverage). */
+                    fprintf(stderr, "liveraid: parity namespace exhausted for %s\n",
+                            path);
+                } else {
+                    f->parity_pos_start = new_pos;
+                    dirty_start = f->parity_pos_start;
+                    dirty_count = new_blocks;
+                    f->block_count = new_blocks;
+                    state_rebuild_pos_index(s, f->drive_idx);
+                }
             } else if (f->parity_pos_start + old_blocks == pa->next_free) {
                 dirty_start = f->parity_pos_start + old_blocks;
                 dirty_count = new_blocks - old_blocks;
                 pa->next_free += dirty_count;
+                f->block_count = new_blocks;
+                state_rebuild_pos_index(s, f->drive_idx);
             } else {
                 free_positions(pa, f->parity_pos_start, old_blocks);
-                f->parity_pos_start = alloc_positions(pa, new_blocks);
-                dirty_start = f->parity_pos_start;
-                dirty_count = new_blocks;
+                uint32_t new_pos = alloc_positions(pa, new_blocks);
+                if (new_pos == UINT32_MAX) {
+                    f->block_count = 0;
+                    state_rebuild_pos_index(s, f->drive_idx);
+                    fprintf(stderr, "liveraid: parity namespace exhausted for %s\n",
+                            path);
+                } else {
+                    f->parity_pos_start = new_pos;
+                    dirty_start = f->parity_pos_start;
+                    dirty_count = new_blocks;
+                    f->block_count = new_blocks;
+                    state_rebuild_pos_index(s, f->drive_idx);
+                }
             }
-            f->block_count = new_blocks;
-            state_rebuild_pos_index(s, f->drive_idx);
         }
 
         if (new_end > f->size)

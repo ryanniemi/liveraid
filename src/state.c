@@ -9,6 +9,9 @@
 
 lr_state *g_state = NULL;
 
+static pthread_once_t s_rng_once = PTHREAD_ONCE_INIT;
+static void s_seed_rng(void) { srandom((unsigned int)time(NULL)); }
+
 int state_init(lr_state *s, const lr_config *cfg)
 {
     unsigned i;
@@ -182,11 +185,7 @@ unsigned state_pick_drive(lr_state *s)
         /* Probabilistic: each drive's selection probability is proportional
          * to its free space.  A drive with 2× the free space is 2× as likely
          * to be chosen.  Falls back to drive 0 if all drives are full. */
-        static int seeded = 0;
-        if (!seeded) {
-            srandom((unsigned int)time(NULL));
-            seeded = 1;
-        }
+        pthread_once(&s_rng_once, s_seed_rng);
         uint64_t total_free = 0;
         for (i = 0; i < s->drive_count; i++)
             total_free += free_bytes[i];

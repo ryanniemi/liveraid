@@ -15,8 +15,10 @@ the file table.
 ### File placement
 
 When a file is created, a drive is chosen according to `placement_policy`:
-- **mostfree**: pick the drive with the most free bytes (`statvfs`)
-- **roundrobin**: cycle through drives in order
+- **mostfree**: pick the drive with the most free bytes (`statvfs`) — default
+- **lfs**: least-free-space; fill the fullest drive first
+- **pfrd**: probabilistic weighted by free space; a drive with 2× the free space is 2× as likely to be chosen
+- **roundrobin**: cycle through drives in config order
 
 The file is stored entirely on that drive. Its real path is
 `<drive_dir>/<virtual_path>`.
@@ -257,7 +259,7 @@ liveraid/
     │                   # lr_dir: vpath, mode, uid, gid, mtime
     ├── lr_hash.h/c     # Intrusive separate-chaining hash map (FNV-1a)
     ├── lr_list.h/c     # Intrusive doubly-linked list
-    ├── alloc.h/c       # Global parity-position allocator (sorted free extents + high-water mark)
+    ├── alloc.h/c       # Per-drive parity-position allocator (sorted free extents + high-water mark)
     ├── metadata.h/c    # Content-file load/save (atomic write, CRC32)
     │                   # 11-field format with mode/uid/gid; backward-compat load
     ├── fuse_ops.h/c    # FUSE3 high-level operation callbacks

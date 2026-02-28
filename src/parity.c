@@ -190,10 +190,12 @@ int parity_update_position(lr_state *s, uint32_t pos, void **scratch_v)
                    (uint8_t **)scratch_v + nd);
 
     /* Write parity blocks */
-    for (unsigned p = 0; p < np; p++)
-        parity_write_block(s->parity, p, pos, scratch_v[nd + p]);
-
-    return 0;
+    int write_err = 0;
+    for (unsigned p = 0; p < np; p++) {
+        if (parity_write_block(s->parity, p, pos, scratch_v[nd + p]) != 0)
+            write_err = 1;
+    }
+    return write_err ? -1 : 0;
 }
 
 /* ------------------------------------------------------------------ */

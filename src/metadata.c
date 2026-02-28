@@ -48,7 +48,7 @@ static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len)
 int metadata_load(lr_state *s)
 {
     FILE *f = NULL;
-    char  line[4096];
+    char  line[PATH_MAX + 256];
     int   lineno = 0;
     unsigned i;
 
@@ -132,7 +132,7 @@ int metadata_load(lr_state *s)
 
         /* Directory records: dir|VPATH|MODE|UID|GID|MTIME_SEC|MTIME_NSEC */
         if (strncmp(p, "dir|", 4) == 0) {
-            char buf[4096];
+            char buf[PATH_MAX + 256];
             strncpy(buf, p + 4, sizeof(buf) - 1);
             buf[sizeof(buf)-1] = '\0';
 
@@ -148,6 +148,12 @@ int metadata_load(lr_state *s)
             char *mtime_s  = tok;
             tok = strchr(mtime_s, '|'); if (!tok) continue; *tok++ = '\0';
             char *mtime_ns_s = tok;
+
+            if (strlen(vpath) >= PATH_MAX) {
+                fprintf(stderr, "metadata: dir vpath too long at line %d, skipping\n",
+                        lineno);
+                continue;
+            }
 
             lr_dir *dir = calloc(1, sizeof(lr_dir));
             if (!dir) { fclose(f); return -1; }
@@ -170,7 +176,7 @@ int metadata_load(lr_state *s)
             continue;
 
         char *tok;
-        char  buf[4096];
+        char  buf[PATH_MAX + 256];
         strncpy(buf, p + 5, sizeof(buf) - 1);
         buf[sizeof(buf)-1] = '\0';
 
@@ -205,6 +211,11 @@ int metadata_load(lr_state *s)
         if (drive_idx == UINT32_MAX) {
             fprintf(stderr, "metadata: unknown drive '%s' at line %d, skipping\n",
                     drive_name, lineno);
+            continue;
+        }
+        if (strlen(vpath) >= PATH_MAX) {
+            fprintf(stderr, "metadata: file vpath too long at line %d, skipping\n",
+                    lineno);
             continue;
         }
 

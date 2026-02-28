@@ -64,7 +64,7 @@ storage where total array loss is a worse outcome than partial file loss.
 - **Scrub**: `kill -USR1 <pid>` verifies parity against data; `kill -USR2 <pid>` repairs any mismatches
 - **Persistent metadata**: content file saved atomically on unmount and every 5 min
 - **CRC32 integrity**: content file footer detects corruption at load time
-- **Drive selection**: `mostfree` (default) or `roundrobin`
+- **Drive selection**: `mostfree` (default), `lfs`, `pfrd`, or `roundrobin`
 
 ## Requirements
 
@@ -111,7 +111,7 @@ mountpoint /srv/array
 # Block size in KiB (default 256, must be multiple of 64 bytes)
 #blocksize 256
 
-# Drive selection policy for new files: mostfree | roundrobin
+# Drive selection policy for new files: mostfree | lfs | pfrd | roundrobin
 #placement mostfree
 ```
 

@@ -70,6 +70,16 @@ static void journal_bitmap_save(lr_journal *j)
         return;
     }
 
+    /* Skip write if all bits are zero */
+    int has_bits = 0;
+    for (uint32_t w = 0; w < words && !has_bits; w++)
+        if (copy[w]) has_bits = 1;
+    if (!has_bits) {
+        unlink(j->bitmap_path);
+        free(copy);
+        return;
+    }
+
     char tmp[PATH_MAX + 8]; /* +8 for ".tmp\0" with room to spare */
     snprintf(tmp, sizeof(tmp), "%s.tmp", j->bitmap_path);
 

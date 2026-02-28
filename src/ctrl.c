@@ -160,8 +160,9 @@ static int live_rebuild_one_file(lr_ctrl *c, int conn,
     /* --- Restore metadata --- */
     if (mode & 07777)
         chmod(real_path, mode & 07777);
-    if (uid != 0 || gid != 0)
-        if (lchown(real_path, uid, gid) != 0) {}
+    /* Best-effort: may fail if not running as root */
+    int chown_rc = lchown(real_path, uid, gid);
+    (void)chown_rc;
     if (mtime_sec != 0) {
         struct timespec ts[2];
         ts[0].tv_sec  = mtime_sec;  ts[0].tv_nsec = mtime_nsec;
