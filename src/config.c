@@ -145,6 +145,15 @@ int config_load(const char *path, lr_config *cfg)
             }
             cfg->parity_threads = (unsigned)val;
 
+        } else if (strcmp(key, "bitmap_interval") == 0) {
+            long val = strtol(rest, NULL, 10);
+            if (val < 1 || val > 86400) {
+                fprintf(stderr, "config:%d: bitmap_interval must be between 1 and 86400\n", lineno);
+                fclose(f);
+                return -1;
+            }
+            cfg->bitmap_interval_s = (unsigned)val;
+
         } else {
             fprintf(stderr, "config:%d: unknown directive '%s'\n", lineno, key);
             /* non-fatal: ignore */

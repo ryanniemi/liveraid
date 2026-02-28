@@ -62,7 +62,7 @@ storage where total array loss is a worse outcome than partial file loss.
 - **Live rebuild**: if the filesystem is mounted, `liveraid rebuild` automatically connects via a Unix domain socket and rebuilds without unmounting; files currently open are skipped and reported
 - **Crash-consistent journal**: dirty bitmap saved to disk periodically; restored on unclean remount
 - **Scrub**: `kill -USR1 <pid>` verifies parity against data; `kill -USR2 <pid>` repairs any mismatches
-- **Persistent metadata**: content file saved atomically on unmount and every 5 min
+- **Persistent metadata**: content file saved atomically on unmount and periodically (default every 5 min, configurable)
 - **CRC32 integrity**: content file footer detects corruption at load time
 - **Drive selection**: `mostfree` (default), `lfs`, `pfrd`, or `roundrobin`
 
@@ -84,7 +84,7 @@ make
 The binary `liveraid` is placed in the current directory.
 
 ```sh
-make test                  # build and run the unit test suite (59 tests, no extra deps)
+make test                  # build and run the unit test suite (62 tests, no extra deps)
 bash tests/integration.sh  # live FUSE integration tests (requires fusermount3, ~500 MiB /tmp)
 make clean                 # remove objects, binary, and test binaries
 ```
@@ -115,6 +115,9 @@ mountpoint /srv/array
 
 # Drive selection policy for new files: mostfree | lfs | pfrd | roundrobin
 #placement mostfree
+
+# Seconds between periodic bitmap+metadata saves (default 300, range 1–86400)
+#bitmap_interval 300
 ```
 
 **Directives:**
@@ -128,6 +131,7 @@ mountpoint /srv/array
 | `blocksize KiB` | no | Parity block size in KiB (default 256). Must be a multiple of 64 bytes. |
 | `placement POLICY` | no | `mostfree` (default) — most free space; `lfs` — least free space (fill fullest drive first); `pfrd` — weighted random by free space; `roundrobin` — cycle in config order. |
 | `parity_threads N` | no | Threads used to drain the dirty-parity bitmap in parallel (default 1, max 64). Each thread processes an independent subset of dirty positions. |
+| `bitmap_interval N` | no | Seconds between periodic metadata and bitmap saves (default 300, range 1–86400). Lower values reduce the crash-recovery window at the cost of more frequent disk writes. |
 
 ## Storage overhead
 
@@ -321,11 +325,11 @@ Only the highest-numbered level can be removed (levels must remain contiguous).
 ## Limitations
 
 **Parity / recovery**
-- Crash recovery is best-effort: the dirty bitmap is saved every 5 minutes
-  (hardcoded; not currently a config option). Writes in the window
-  between two saves are not recorded; after a crash those positions may have
-  stale parity that is not flagged for recomputation. A clean unmount always
-  flushes parity and deletes the bitmap file.
+- Crash recovery is best-effort: the dirty bitmap is saved periodically
+  (default every 5 minutes; configurable with `bitmap_interval`). Writes in
+  the window between two saves are not recorded; after a crash those positions
+  may have stale parity that is not flagged for recomputation. A clean unmount
+  always flushes parity and deletes the bitmap file.
 - Read recovery requires parity to be current for the affected position. A
   crash before the background sweep can leave parity stale, resulting in
   silently wrong recovered data. A post-crash repair (`kill -USR2`) detects

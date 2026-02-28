@@ -33,7 +33,7 @@ static void test_minimal_valid(void)
     ASSERT_STR_EQ(cfg.mountpoint,        "/tmp/lr_mount");
 }
 
-/* Default blocksize, placement, parity_threads when not specified. */
+/* Default blocksize, placement, parity_threads, bitmap_interval_s when not specified. */
 static void test_defaults(void)
 {
     write_conf(
@@ -43,10 +43,11 @@ static void test_defaults(void)
     );
     lr_config cfg;
     ASSERT_INT_EQ(config_load(CONF, &cfg), 0);
-    ASSERT_INT_EQ(cfg.block_size,       256 * 1024);
-    ASSERT_INT_EQ(cfg.placement_policy, LR_PLACE_MOSTFREE);
-    ASSERT_INT_EQ(cfg.parity_threads,   1);
-    ASSERT_INT_EQ(cfg.parity_levels,    0);
+    ASSERT_INT_EQ(cfg.block_size,         256 * 1024);
+    ASSERT_INT_EQ(cfg.placement_policy,   LR_PLACE_MOSTFREE);
+    ASSERT_INT_EQ(cfg.parity_threads,     1);
+    ASSERT_INT_EQ(cfg.parity_levels,      0);
+    ASSERT_INT_EQ(cfg.bitmap_interval_s,  0); /* 0 = runtime default (300s) */
 }
 
 /* All four placement policy strings accepted. */
@@ -252,6 +253,43 @@ static void test_multiple_drives(void)
     ASSERT_STR_EQ(cfg.drives[2].name, "gamma");
 }
 
+static void test_bitmap_interval_valid(void)
+{
+    write_conf(
+        "data d0 /tmp/d0\n"
+        "content /tmp/lr.content\n"
+        "mountpoint /tmp/lr_mount\n"
+        "bitmap_interval 60\n"
+    );
+    lr_config cfg;
+    ASSERT_INT_EQ(config_load(CONF, &cfg), 0);
+    ASSERT_INT_EQ(cfg.bitmap_interval_s, 60);
+}
+
+static void test_bad_bitmap_interval_zero(void)
+{
+    write_conf(
+        "data d0 /tmp/d0\n"
+        "content /tmp/lr.content\n"
+        "mountpoint /tmp/lr_mount\n"
+        "bitmap_interval 0\n"
+    );
+    lr_config cfg;
+    ASSERT_INT_EQ(config_load(CONF, &cfg), -1);
+}
+
+static void test_bad_bitmap_interval_too_large(void)
+{
+    write_conf(
+        "data d0 /tmp/d0\n"
+        "content /tmp/lr.content\n"
+        "mountpoint /tmp/lr_mount\n"
+        "bitmap_interval 86401\n"
+    );
+    lr_config cfg;
+    ASSERT_INT_EQ(config_load(CONF, &cfg), -1);
+}
+
 static void test_file_not_found(void)
 {
     unlink(CONF);
@@ -276,6 +314,9 @@ int main(void)
     RUN(test_blocksize_valid);
     RUN(test_bad_parity_threads_zero);
     RUN(test_bad_parity_threads_too_large);
+    RUN(test_bitmap_interval_valid);
+    RUN(test_bad_bitmap_interval_zero);
+    RUN(test_bad_bitmap_interval_too_large);
     RUN(test_unknown_directive_nonfatal);
     RUN(test_comments_and_blank_lines);
     RUN(test_multiple_drives);

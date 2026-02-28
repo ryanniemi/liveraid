@@ -60,13 +60,21 @@ The following operations mark parity positions dirty:
 | `unlink` | All blocks the deleted file occupied |
 
 Dirty positions are recorded in a per-bit bitmap (one bit per position).
-A background worker thread wakes either on signal or after a 5-second
-interval. It atomically swaps out the current bitmap, replaces it with an
-empty one, then drains the old bitmap. If `parity_threads` is 1 (default),
-dirty positions are processed serially. If `parity_threads` is greater than 1,
-the dirty positions are collected into an array and divided into equal chunks;
-each chunk is handled by a separate thread, each with its own scratch vector,
-calling `parity_update_position` under a shared read lock on the state.
+A background worker thread wakes on a timer (default every 5 seconds, or
+sooner if `bitmap_interval` is shorter). On each wake-up it first runs the
+periodic save if the save interval has elapsed (see [Crash journal](#crash-journal)
+below), then atomically swaps out the current bitmap, replaces it with an empty
+one, and drains the old bitmap. `journal_mark_dirty_range` does not signal the
+worker; drain is timer-driven so that dirty positions are still in the bitmap
+when the periodic save fires. Explicit flushes — file close (`lr_flush` →
+`journal_flush`) and unmount — signal the worker directly and block until the
+bitmap is empty.
+
+If `parity_threads` is 1 (default), dirty positions are processed serially.
+If `parity_threads` is greater than 1, the dirty positions are collected into
+an array and divided into equal chunks; each chunk is handled by a separate
+thread, each with its own scratch vector, calling `parity_update_position`
+under a shared read lock on the state.
 
 `parity_update_position` reads one block from each data drive at the given
 position (zero-filling when no file covers that position), calls
@@ -81,9 +89,17 @@ always consistent with the data at rest after a clean unmount.
 
 ### Crash journal
 
-The in-memory dirty bitmap is saved to `<first_content_path>.bitmap` as part
-of each periodic metadata save (every 5 minutes by default). On clean unmount
-the file is deleted.
+The in-memory dirty bitmap is saved to `<first_content_path>.bitmap` at the
+start of each background-worker wake-up cycle, **before** the drain swap-out.
+Saving before the drain ensures the file captures the dirty positions that are
+about to be processed: if the process crashes after the save but before (or
+during) the drain, those positions are re-drained on the next mount.
+
+The save interval is controlled by `bitmap_interval` (default 300 s,
+configurable down to 1 s). The worker wakes at `min(drain_interval=5 s,
+bitmap_interval)` so the save fires within the configured interval. Metadata
+(the content file) is written at the same time. On clean unmount the bitmap
+file is deleted.
 
 On remount, if the bitmap file is found:
 
@@ -93,9 +109,9 @@ On remount, if the bitmap file is found:
    the first parity-sweep cycle completes.
 
 This bounds the stale-parity window after an unclean shutdown to at most one
-save interval (5 minutes). Positions written after the last periodic save but
-before the crash are not recorded and will have silently stale parity; running
-a scrub after remount detects them.
+save interval. Positions written after the last periodic save but before the
+crash are not recorded and will have silently stale parity; running a repair
+(`kill -USR2`) after remount detects and fixes them.
 
 ### Scrub and repair
 
@@ -241,16 +257,17 @@ A mismatch on load prints a warning to stderr but parsing continues.
 
 On mount, the first readable content file is loaded to restore the file table
 and parity position allocator. The background journal worker also saves metadata
-every 5 minutes so the file table is not stale after an unclean shutdown.
+periodically (default every 5 minutes, configurable with `bitmap_interval`) so
+the file table is not stale after an unclean shutdown.
 
 Alongside each periodic metadata save, the in-memory dirty-position bitmap is
 written to `<first_content_path>.bitmap` (binary: `LRBM` magic, word count,
-uint64 array). The array is written in host byte order and is not portable
-across machines with different endianness; it is intended only for crash
-recovery on the same host. On clean unmount the bitmap file is deleted. On
-unclean remount, if the file is present, the stored bits are OR-merged into
-the fresh bitmap so stale parity positions are recomputed by the background
-worker.
+uint64 array) **before** the drain runs so the file captures currently-dirty
+positions. The array is written in host byte order and is not portable across
+machines with different endianness; it is intended only for crash recovery on
+the same host. On clean unmount the bitmap file is deleted. On unclean remount,
+if the file is present, the stored bits are OR-merged into the fresh bitmap so
+stale parity positions are recomputed by the background worker.
 
 ## Source Layout
 

@@ -31,7 +31,7 @@ with no external test framework required.
 | `tests/test_list` | `src/lr_list.c` | Insert-tail; remove from head, tail, middle, and sole element |
 | `tests/test_state` | `src/state.c` + support | File and dir CRUD; `blocks_for_size`; position-index binary search; round-robin drive selection |
 | `tests/test_metadata` | `src/metadata.c` + support | Save/load roundtrip (all 11 file fields, all dir fields); fresh-start with no content file; old 8-field format compatibility; allocator state persistence across save/load |
-| `tests/test_config` | `src/config.c` | Valid configs; default values; all placement policies; parity levels and gap detection; error paths (no drives, no content, no mountpoint, bad blocksize, bad parity_threads); unknown directives (non-fatal); comments and blank lines |
+| `tests/test_config` | `src/config.c` | Valid configs; default values; all placement policies; parity levels and gap detection; error paths (no drives, no content, no mountpoint, bad blocksize, bad parity_threads, bad bitmap_interval); unknown directives (non-fatal); comments and blank lines |
 
 ### Unit test conventions
 
@@ -54,7 +54,7 @@ exercises end-to-end behaviour. Prerequisites: `fusermount3` (`apt install fuse3
 bash tests/integration.sh   # run from repo root
 ```
 
-The script creates 4 data drives + 2 parity levels, runs 13 test sections, and
+The script creates 4 data drives + 2 parity levels, runs 14 test sections, and
 prints a `PASS`/`FAIL` summary. Each section calls `wipe_data` to start clean.
 
 | # | Section | What is exercised |
@@ -65,13 +65,14 @@ prints a `PASS`/`FAIL` summary. Each section calls `wipe_data` to start clean.
 | 4 | 2-drive failure recovery | Simultaneous loss of 2 drives; transparent read via 2-level parity |
 | 5 | Offline rebuild | `liveraid rebuild` reconstructs 2 drives from parity (no mount) |
 | 6 | Live rebuild + busy-file skip | Socket rebuild skips open files; rebuilds after close |
-| 7 | Crash recovery (kill -9) | Content file survives SIGKILL; parity clean after remount |
+| 7 | Crash recovery (kill -9) | `bitmap_interval 3` config; bitmap saved before drain (pre-drain snapshot); persists after SIGKILL; parity clean after remount |
 | 8 | Multiple content paths | All paths written on save; secondary used when primary missing |
 | 9 | Empty files | size=0 after create and after remount |
 | 10 | Directory metadata | `chmod` + `utimens` on dirs persist across remount |
 | 11 | Socket scrub/repair | `scrub` and `scrub repair` commands return 0 mismatches via ctrl socket |
 | 12 | Position reuse | Parity position freed by `unlink` is reused by next allocation |
-| 13 | Placement policy smoke | `mostfree`, `lfs`, `pfrd`: 8 files readable + parity clean each |
+| 13 | chown on files and dirs | uid/gid set immediately and persists across remount |
+| 14 | Placement policy smoke | `mostfree`, `lfs`, `pfrd`: 8 files readable + parity clean each |
 
 ## Architecture
 
@@ -121,7 +122,7 @@ prints a `PASS`/`FAIL` summary. Each section calls `wipe_data` to start clean.
 - `parity_recover_block` — multi-drive recovery via matrix inversion
 - `parity_scrub(s, result, repair)` — full scan; if repair=1, rewrites mismatched blocks
 
-**Write-Back Journal** (`src/journal.c`): Dirty-position bitmap. Background worker drains it every 5 s or on signal. When `parity_threads > 1`, positions are collected into an array and divided across N threads (each with its own scratch vector). Bitmap is persisted to `<content_path>.bitmap` for crash recovery.
+**Write-Back Journal** (`src/journal.c`): Dirty-position bitmap. Background worker wakes on a timer (every `min(5 s, bitmap_interval)`); `journal_mark_dirty_range` does NOT signal — drain is timer-driven so dirty positions are still present when the periodic save fires. File close (`lr_flush`) and unmount call `journal_flush` which signals directly and waits. Bitmap is saved BEFORE the drain swap-out so the on-disk file captures dirty positions for crash recovery. When `parity_threads > 1`, positions are collected into an array and divided across N threads (each with its own scratch vector).
 
 **Control Server** (`src/ctrl.c`): Unix domain socket at `<content_path>.ctrl`. Commands: `rebuild DRIVE\n`, `scrub\n`, `scrub repair\n`.
 
@@ -153,6 +154,7 @@ mountpoint PATH        # FUSE mount point
 blocksize 256          # Block size in KiB (default 256)
 placement mostfree     # mostfree | lfs | pfrd | roundrobin
 parity_threads 4       # Parallel threads for parity drain (default 1, max 64)
+bitmap_interval 60     # Seconds between periodic bitmap+metadata saves (default 300)
 ```
 
 ## Usage

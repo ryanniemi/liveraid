@@ -36,3 +36,9 @@ mountpoint /srv/array
 # Each thread handles an independent subset of dirty positions.
 # Set to match the number of data drives or available CPU cores, whichever is smaller.
 #parity_threads 4
+
+# Seconds between periodic metadata and bitmap saves (default 300, range 1–86400).
+# The bitmap is saved before each drain so that dirty positions are captured for
+# crash recovery.  Lower values shrink the crash-recovery window at the cost of
+# more frequent disk writes.
+#bitmap_interval 300

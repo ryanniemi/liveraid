@@ -16,16 +16,17 @@
 #   4. 2 parity levels, simultaneous 2-drive failure transparent recovery
 #   5. Offline rebuild of 2 drives from 2-level parity
 #   6. Live rebuild (socket) with busy-file skip + subsequent rebuild after close
-#   7. Crash recovery: kill -9, content file persists, parity clean after remount
+#   7. Crash recovery: bitmap_interval 3, bitmap saved before drain + persists after kill -9
 #   8. Multiple content paths: both written on save, secondary used when primary missing
 #   9. Empty files: size=0 created and survives remount
 #  10. Directory metadata: chmod and utimens persist across remount
 #  11. Control socket: scrub and scrub repair return 0 mismatches
 #  12. Position reuse: parity position freed by unlink is reused by next alloc
-#  13. Placement policies: mostfree, lfs, pfrd smoke test (8 files + parity clean)
+#  13. chown: uid/gid on files and dirs, immediate + remount persistence
+#  14. Placement policies: mostfree, lfs, pfrd smoke test (8 files + parity clean)
 #
 # Tests 1-9 use 4 drives + 2 parity levels + parity_threads=4.
-# Tests 10-13 use various configs as noted inline.
+# Tests 10-14 use various configs as noted inline.
 # Drives and parity are created under /tmp/lrt/ and cleaned up after each test.
 
 set -euo pipefail
@@ -233,42 +234,62 @@ unmount_fs
 
 # ===================================================================
 echo ""
-echo "=== Crash recovery: kill -9 resilience ==="
+echo "=== Crash recovery: bitmap persistence + kill -9 ==="
 wipe_data
-mount_fs
 
-# Phase 1: write files, drain parity, clean unmount → saves content file
+# Use a short bitmap_interval so we don't wait 5 minutes
+cat > /tmp/lrt/crash_recovery.conf << 'CONFEOF'
+data d1 /tmp/lrt/d1
+data d2 /tmp/lrt/d2
+data d3 /tmp/lrt/d3
+data d4 /tmp/lrt/d4
+parity 1 /tmp/lrt/parity1/liveraid.parity
+parity 2 /tmp/lrt/parity2/liveraid.parity
+content /tmp/lrt/content/liveraid.content
+mountpoint /tmp/lrt/mount
+blocksize 64
+placement roundrobin
+parity_threads 4
+bitmap_interval 3
+CONFEOF
+
+$BIN -c /tmp/lrt/crash_recovery.conf -f $MNT >>/tmp/lrt/liveraid.log 2>&1 &
+sleep 1.5
+if ! grep -q lrt /proc/mounts; then
+    echo "ERROR: mount failed"; tail -5 /tmp/lrt/liveraid.log; exit 1
+fi
+
+# Phase 1: write data via an open fd (keeping fd open prevents lr_flush from
+# calling journal_flush, so dirty positions stay in the bitmap).  The background
+# worker saves the bitmap BEFORE draining it when save_interval_s (3s) elapses.
+# Sleep 4s: past the first 3s save+drain cycle, before the second (at 6s).
+exec 7> $MNT/crash_open.dat
 for i in $(seq 1 8); do
-    dd if=/dev/urandom of=$MNT/crash${i}.bin bs=65536 count=2 2>/dev/null
+    dd if=/dev/urandom bs=65536 count=2 >&7 2>/dev/null
 done
-sleep 11   # two drain cycles
-unmount_fs
 
-content_file=/tmp/lrt/content/liveraid.content
-[ -f "$content_file" ] \
-    && pass "crash recovery: content file saved on clean unmount" \
-    || fail "crash recovery" "content file missing after unmount"
+sleep 4   # > bitmap_interval=3; first timer fires at ~3s, saves bitmap BEFORE drain
 
-# Phase 2: remount, write more data, drain, then kill -9
-> /tmp/lrt/liveraid.log
-mount_fs
-for i in $(seq 1 4); do
-    dd if=/dev/urandom of=$MNT/crash_post${i}.bin bs=65536 count=2 2>/dev/null
-done
-sleep 11   # drain parity for post-mount writes
+bitmap_path=/tmp/lrt/content/liveraid.content.bitmap
+[ -f "$bitmap_path" ] \
+    && pass "crash recovery: bitmap saved before drain (bitmap_interval=3)" \
+    || fail "crash recovery" "bitmap not present after 4s"
+
+# kill -9 while bitmap is on disk (before next 3s cycle overwrites with empty bitmap)
 kill -9 $(pidof liveraid) 2>/dev/null || true
+exec 7>&- 2>/dev/null || true   # close fd (daemon already dead, ignore errors)
 sleep 0.5
 fusermount3 -u $MNT 2>/dev/null || true   # detach orphaned FUSE endpoint
 sleep 0.3
 
-[ -f "$content_file" ] \
-    && pass "crash recovery: content file persists after kill -9" \
-    || fail "crash recovery" "content file gone after kill -9"
+[ -f "$bitmap_path" ] \
+    && pass "crash recovery: bitmap persists after kill -9" \
+    || fail "crash recovery" "bitmap gone after kill -9"
 
-# Phase 3: remount (loads content from Phase 1 clean unmount), drain, repair
+# Phase 2: remount with standard config, drain, repair
 > /tmp/lrt/liveraid.log
 mount_fs
-sleep 11   # drain any dirty blocks
+sleep 11   # drain dirty blocks loaded from bitmap
 
 kill -USR2 $(pidof liveraid)
 sleep 4
@@ -282,15 +303,13 @@ else
     fail "crash recovery" "$result"
 fi
 
-# Phase 4: verify pre-crash data is accessible
+# Phase 3: verify pre-crash data is accessible (16 blocks × 64 KiB = 1 MiB)
 mount_fs
-all_ok=1
-for i in $(seq 1 8); do
-    sz=$(stat -c '%s' $MNT/crash${i}.bin 2>/dev/null || echo 0)
-    [ "$sz" = "131072" ] || { echo "  crash${i}.bin: size=$sz"; all_ok=0; }
-done
-[ "$all_ok" = "1" ] && pass "crash recovery: pre-crash data files intact" \
-                     || fail "crash recovery" "data file size wrong"
+expected_sz=$((8 * 2 * 65536))   # 8 batches × 2 blocks × 65536 bytes = 1048576
+sz=$(stat -c '%s' $MNT/crash_open.dat 2>/dev/null || echo 0)
+[ "$sz" = "$expected_sz" ] \
+    && pass "crash recovery: pre-crash data file intact (size=$sz)" \
+    || fail "crash recovery" "crash_open.dat size=$sz (expected $expected_sz)"
 unmount_fs
 
 # ===================================================================
@@ -446,6 +465,71 @@ echo "  pos_b.txt at parity position $pos"
 [ "$pos" = "0" ] \
     && pass "position reuse: freed position reused by next allocation" \
     || fail "position reuse" "pos=$pos (expected 0)"
+
+# ===================================================================
+echo ""
+echo "=== chown: uid/gid on files and dirs ==="
+wipe_data
+# Single-drive config (keeps it simple)
+cat > /tmp/lrt/chown_test.conf << 'CONFEOF'
+data d1 /tmp/lrt/d1
+parity 1 /tmp/lrt/parity1/liveraid.parity
+content /tmp/lrt/content/liveraid.content
+mountpoint /tmp/lrt/mount
+blocksize 64
+placement roundrobin
+parity_threads 1
+CONFEOF
+
+$BIN -c /tmp/lrt/chown_test.conf -f $MNT >>/tmp/lrt/liveraid.log 2>&1 &
+sleep 1.5
+if ! grep -q lrt /proc/mounts; then
+    echo "ERROR: mount failed"; tail -5 /tmp/lrt/liveraid.log; exit 1
+fi
+
+myuid=$(id -u)
+mygid=$(id -g)
+# Use a secondary group if available; otherwise fall back to primary gid
+alt_gid=$(id -G | tr ' ' '\n' | grep -v "^${mygid}$" | head -1 || true)
+[ -z "$alt_gid" ] && alt_gid=$mygid
+
+echo "chown_file.txt" > $MNT/chown_file.txt
+chown ${myuid}:${alt_gid} $MNT/chown_file.txt
+got_uid=$(stat -c '%u' $MNT/chown_file.txt)
+got_gid=$(stat -c '%g' $MNT/chown_file.txt)
+[ "$got_uid" = "$myuid" ] && [ "$got_gid" = "$alt_gid" ] \
+    && pass "chown file: uid/gid set immediately" \
+    || fail "chown file" "uid=$got_uid gid=$got_gid (expected $myuid:$alt_gid)"
+
+mkdir $MNT/chown_dir
+chown ${myuid}:${alt_gid} $MNT/chown_dir
+got_uid=$(stat -c '%u' $MNT/chown_dir)
+got_gid=$(stat -c '%g' $MNT/chown_dir)
+[ "$got_uid" = "$myuid" ] && [ "$got_gid" = "$alt_gid" ] \
+    && pass "chown dir: uid/gid set immediately" \
+    || fail "chown dir" "uid=$got_uid gid=$got_gid (expected $myuid:$alt_gid)"
+
+# Remount and verify persistence
+fusermount3 -u $MNT; sleep 0.3
+$BIN -c /tmp/lrt/chown_test.conf -f $MNT >>/tmp/lrt/liveraid.log 2>&1 &
+sleep 1.5
+if ! grep -q lrt /proc/mounts; then
+    echo "ERROR: remount failed"; tail -5 /tmp/lrt/liveraid.log; exit 1
+fi
+
+got_uid=$(stat -c '%u' $MNT/chown_file.txt)
+got_gid=$(stat -c '%g' $MNT/chown_file.txt)
+[ "$got_uid" = "$myuid" ] && [ "$got_gid" = "$alt_gid" ] \
+    && pass "chown file: uid/gid persists after remount" \
+    || fail "chown file remount" "uid=$got_uid gid=$got_gid (expected $myuid:$alt_gid)"
+
+got_uid=$(stat -c '%u' $MNT/chown_dir)
+got_gid=$(stat -c '%g' $MNT/chown_dir)
+[ "$got_uid" = "$myuid" ] && [ "$got_gid" = "$alt_gid" ] \
+    && pass "chown dir: uid/gid persists after remount" \
+    || fail "chown dir remount" "uid=$got_uid gid=$got_gid (expected $myuid:$alt_gid)"
+
+unmount_fs
 
 # ===================================================================
 echo ""

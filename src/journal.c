@@ -216,11 +216,16 @@ static void *worker_thread(void *arg)
     time_t last_save = time(NULL);
 
     while (1) {
-        /* Wait for wake signal or interval timeout */
+        /* Wait for wake signal or interval timeout.
+         * Use min(interval_ms, save_interval_s * 1000) so the save fires
+         * within save_interval_s seconds even if not signalled externally. */
+        unsigned sleep_ms = j->interval_ms;
+        if (j->save_interval_s > 0 && j->save_interval_s * 1000 < sleep_ms)
+            sleep_ms = j->save_interval_s * 1000;
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_sec  += j->interval_ms / 1000;
-        ts.tv_nsec += (j->interval_ms % 1000) * 1000000L;
+        ts.tv_sec  += sleep_ms / 1000;
+        ts.tv_nsec += (sleep_ms % 1000) * 1000000L;
         if (ts.tv_nsec >= 1000000000L) {
             ts.tv_sec++;
             ts.tv_nsec -= 1000000000L;
@@ -233,8 +238,26 @@ static void *worker_thread(void *arg)
             pthread_mutex_unlock(&j->bitmap_lock);
             break;
         }
+        pthread_mutex_unlock(&j->bitmap_lock);
+
+        /* Periodic metadata + bitmap save — done BEFORE the swap so the saved
+         * bitmap contains the dirty positions that are about to be drained.
+         * This ensures crash recovery works: if the process dies after the save
+         * but before (or during) the drain, those positions are re-drained on
+         * the next mount. */
+        if (j->save_interval_s > 0) {
+            time_t now = time(NULL);
+            if (now - last_save >= (time_t)j->save_interval_s) {
+                pthread_rwlock_rdlock(&s->state_lock);
+                metadata_save(s);
+                pthread_rwlock_unlock(&s->state_lock);
+                journal_bitmap_save(j);
+                last_save = now;
+            }
+        }
 
         /* Atomically swap out the bitmap */
+        pthread_mutex_lock(&j->bitmap_lock);
         uint64_t *old_bm    = j->bitmap;
         uint32_t  old_words = j->bitmap_words;
         j->bitmap       = NULL;
@@ -380,19 +403,7 @@ static void *worker_thread(void *arg)
         pthread_cond_broadcast(&j->drain_cond);
         pthread_mutex_unlock(&j->bitmap_lock);
 
-        /* Periodic metadata + bitmap save */
-        if (j->save_interval_s > 0) {
-            time_t now = time(NULL);
-            if (now - last_save >= (time_t)j->save_interval_s) {
-                pthread_rwlock_rdlock(&s->state_lock);
-                metadata_save(s);
-                pthread_rwlock_unlock(&s->state_lock);
-                journal_bitmap_save(j);
-                last_save = now;
-            }
-        }
-
-        /* Scrub / repair if requested */
+        /* Scrub / repair if requested — after the drain completes */
         if (j->repair_pending || j->scrub_pending) {
             int do_repair    = j->repair_pending;
             j->scrub_pending  = 0;
@@ -431,7 +442,7 @@ int journal_init(lr_journal *j, struct lr_state *s, unsigned interval_ms,
     memset(j, 0, sizeof(*j));
     j->state            = s;
     j->interval_ms      = interval_ms > 0 ? interval_ms : 5000;
-    j->save_interval_s  = 300; /* save metadata + bitmap every 5 minutes */
+    j->save_interval_s  = s->cfg.bitmap_interval_s > 0 ? s->cfg.bitmap_interval_s : 300;
     j->nthreads         = nthreads > 0 ? nthreads : 1;
     j->running          = 1;
 
@@ -482,7 +493,9 @@ void journal_mark_dirty_range(lr_journal *j, uint32_t start, uint32_t count)
     pthread_mutex_lock(&j->bitmap_lock);
     for (uint32_t i = 0; i < count; i++)
         bitmap_set(j, start + i);
-    pthread_cond_signal(&j->wake_cond);
+    /* No signal here: drain is timer-driven so the periodic save fires first
+     * and captures the dirty bitmap before it is drained (crash recovery).
+     * Explicit drains (file close, unmount) use journal_flush() which signals. */
     pthread_mutex_unlock(&j->bitmap_lock);
 }
 
