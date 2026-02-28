@@ -170,12 +170,14 @@ has no file covering position K contributes a zero block at that position.
 parity[level][K] = ec_encode_data over { drive[0][K], drive[1][K], …, drive[nd-1][K] }
 ```
 
-Positions are allocated with a bump allocator: each new file is assigned a
-fresh contiguous range starting at `next_free`. Because files on different
-drives get distinct ranges by default, a position typically has data on exactly
-one drive and zeros on all others — parity at that position equals the single
-drive's block. This is still correct and recoverable; it just means the parity
-file is proportionally larger than a tightly-packed layout would require.
+Positions are allocated from a sorted free-extent list (first-fit), falling
+back to advancing the `next_free` high-water mark when no suitable free range
+exists. Freed ranges are returned to the extent list with neighbor merging and
+are persisted across remounts in the content file. Because files on different
+drives get distinct ranges, a position typically has data on exactly one drive
+and zeros on all others — parity at that position equals the single drive's
+block. This is still correct and recoverable; it just means the parity file is
+proportionally larger than a tightly-packed layout would require.
 
 ### Write-back journal
 
@@ -407,7 +409,7 @@ liveraid/
     │                   # mtime, mode, uid, gid
     ├── lr_hash.h/c     # Intrusive separate-chaining hash map (FNV-1a)
     ├── lr_list.h/c     # Intrusive doubly-linked list
-    ├── alloc.h/c       # Global parity-position allocator (sorted free extents + bump)
+    ├── alloc.h/c       # Global parity-position allocator (sorted free extents + high-water mark)
     ├── metadata.h/c    # Content-file load/save (atomic write, CRC32)
     │                   # 11-field format with mode/uid/gid; backward-compat load
     ├── fuse_ops.h/c    # FUSE3 high-level operation callbacks
