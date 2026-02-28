@@ -8,12 +8,13 @@ data d1 /mnt/disk1/
 data d2 /mnt/disk2/
 data d3 /mnt/disk3/
 
-# Parity files (up to 6 levels)
+# Parity files: "parity LEVEL PATH"
 # Level 1 = can recover 1 failed drive
-# Level 2 = can recover 2 failed drives, etc.
-parity   /mnt/parity1/liveraid.parity
-#2-parity /mnt/parity2/liveraid.2parity
-#3-parity /mnt/parity3/liveraid.3parity
+# Level 2 = can recover 2 failed drives, etc. (up to 6)
+# Levels must be contiguous starting from 1.
+parity 1 /mnt/parity1/liveraid.parity
+#parity 2 /mnt/parity2/liveraid.parity
+#parity 3 /mnt/parity3/liveraid.parity
 
 # Content file (metadata; list multiple for redundancy)
 content /var/lib/liveraid/liveraid.content

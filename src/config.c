@@ -77,7 +77,7 @@ int config_load(const char *path, lr_config *cfg)
                 return -1;
             }
             if (cfg->drive_count >= LR_DRIVE_MAX) {
-                fprintf(stderr, "config:%d: too many data drives\n", lineno);
+                fprintf(stderr, "config:%d: too many drives\n", lineno);
                 fclose(f);
                 return -1;
             }
@@ -86,27 +86,17 @@ int config_load(const char *path, lr_config *cfg)
             snprintf(dc->dir,  sizeof(dc->dir),  "%s", dir);
 
         } else if (strcmp(key, "parity") == 0) {
-            if (cfg->parity_levels >= LR_LEV_MAX) {
-                fprintf(stderr, "config:%d: too many parity levels\n", lineno);
+            /* parity LEVEL PATH  e.g.:  parity 1 /mnt/p1/liveraid.parity */
+            char *endp;
+            long level = strtol(rest, &endp, 10);
+            char *path = trim(endp);
+            if (level < 1 || level > LR_LEV_MAX || !*path) {
+                fprintf(stderr, "config:%d: bad 'parity' line — expected: parity LEVEL(1-%d) PATH\n",
+                        lineno, LR_LEV_MAX);
                 fclose(f);
                 return -1;
             }
-            snprintf(cfg->parity_path[cfg->parity_levels++],
-                     PATH_MAX, "%s", rest);
-
-        } else if (strcmp(key, "2-parity") == 0 ||
-                   strcmp(key, "3-parity") == 0 ||
-                   strcmp(key, "4-parity") == 0 ||
-                   strcmp(key, "5-parity") == 0 ||
-                   strcmp(key, "6-parity") == 0) {
-            /* Additional parity levels; must appear in order */
-            if (cfg->parity_levels >= LR_LEV_MAX) {
-                fprintf(stderr, "config:%d: too many parity levels\n", lineno);
-                fclose(f);
-                return -1;
-            }
-            snprintf(cfg->parity_path[cfg->parity_levels++],
-                     PATH_MAX, "%s", rest);
+            snprintf(cfg->parity_path[level - 1], PATH_MAX, "%s", path);
 
         } else if (strcmp(key, "content") == 0) {
             if (cfg->content_count >= 8) {
@@ -147,6 +137,22 @@ int config_load(const char *path, lr_config *cfg)
     }
 
     fclose(f);
+
+    /* Compute parity_levels from assigned slots; error on gaps */
+    {
+        int highest = -1, i;
+        for (i = 0; i < LR_LEV_MAX; i++)
+            if (cfg->parity_path[i][0] != '\0')
+                highest = i;
+        for (i = 0; i <= highest; i++) {
+            if (cfg->parity_path[i][0] == '\0') {
+                fprintf(stderr, "config: parity levels have a gap — "
+                        "parity %d is missing\n", i + 1);
+                return -1;
+            }
+        }
+        cfg->parity_levels = (unsigned)(highest + 1);
+    }
 
     /* Validate */
     if (cfg->drive_count == 0) {

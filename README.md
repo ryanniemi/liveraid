@@ -93,9 +93,9 @@ data d1 /mnt/disk1/
 data d2 /mnt/disk2/
 data d3 /mnt/disk3/
 
-# Parity files (up to 6 levels)
-parity   /mnt/parity1/liveraid.parity
-2-parity /mnt/parity2/liveraid.2parity
+# Parity files: "parity LEVEL PATH" (up to 6 levels, contiguous from 1)
+parity 1 /mnt/parity1/liveraid.parity
+#parity 2 /mnt/parity2/liveraid.parity
 
 # Content file (metadata; list multiple for redundancy)
 content /var/lib/liveraid/liveraid.content
@@ -116,8 +116,7 @@ mountpoint /srv/array
 | Directive | Required | Description |
 |-----------|----------|-------------|
 | `data NAME DIR` | yes (≥1) | Register a data drive. `NAME` is used in the content file; `DIR` is the real path on disk. |
-| `parity PATH` | no | Level-1 parity file path. |
-| `2-parity` … `6-parity PATH` | no | Additional parity levels. Must be declared in order. |
+| `parity N PATH` | no | Parity file for level N (1–6). Levels must be contiguous starting from 1. Level 1 recovers 1 failed drive; each additional level recovers one more. |
 | `content PATH` | yes (≥1) | Where to save file metadata. List multiple paths for redundancy (all are written on save, first found is loaded). |
 | `mountpoint PATH` | yes | FUSE mount point. |
 | `blocksize KiB` | no | Parity block size in KiB (default 256). Must be a multiple of 64 bytes. |

@@ -75,8 +75,8 @@ Runtime configuration in `liveraid.conf` (example: `liveraid.conf.example`). Key
 
 ```ini
 data NAME DIR          # Register a data drive
-parity PATH            # Level-1 parity file
-2-parity PATH          # Level-2 parity (up to 6-parity)
+parity 1 PATH          # Level-1 parity file (can recover 1 drive failure)
+parity 2 PATH          # Level-2 parity (up to level 6; must be contiguous from 1)
 content PATH           # Metadata file (list multiple for redundancy)
 mountpoint PATH        # FUSE mount point
 blocksize 256          # Block size in KiB (default 256)
