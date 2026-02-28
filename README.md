@@ -7,13 +7,18 @@
 > not been audited or stress-tested. Use a mature solution (ZFS, mdadm, SnapRAID)
 > for real data protection.
 
-A FUSE filesystem that merges multiple data drives into a single namespace, with
-live parity computed in the background. Unlike traditional striped RAID, files
-are stored whole on a single drive — so if you lose more drives than you have
-parity levels, only the files on those specific drives are gone. Everything on
-the surviving drives remains fully intact and directly readable. Parity is kept
-current via a write-back journal: writes go immediately to the data drive, and
-a background thread computes and writes parity asynchronously.
+A FUSE filesystem that merges multiple data drives of any size into a single
+namespace, with live parity computed in the background. Unlike traditional
+striped RAID, files are stored whole on a single drive — so if you lose more
+drives than you have parity levels, only the files on those specific drives are
+gone. Everything on the surviving drives remains fully intact and directly
+readable. Parity is kept current via a write-back journal: writes go
+immediately to the data drive, and a background thread computes and writes
+parity asynchronously.
+
+Because files are placed on individual drives rather than striped across all of
+them, drives can be different sizes and a new drive can be added to the array
+simply by registering it in the config — no rebalancing or resilvering needed.
 
 Uses Intel ISA-L (`libisal`) for Cauchy-matrix GF(2⁸) erasure coding.
 
@@ -41,6 +46,8 @@ storage where total array loss is a worse outcome than partial file loss.
 ## Features
 
 - **Drive merging**: up to 250 data drives under a single mount point (like mergerfs)
+- **Mixed drive sizes**: drives can be any capacity — no requirement to match sizes
+- **Easy expansion**: add a drive by registering it in the config; no rebalancing required
 - **Erasure coding**: 1–6 parity levels using ISA-L Cauchy-matrix GF(2⁸) with AVX2 acceleration
 - **Whole-file placement**: each file lives entirely on one drive (like UnRAID)
 - **Live parity**: dirty blocks queued in a bitmap; background thread drains it
