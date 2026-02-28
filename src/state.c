@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <sys/statvfs.h>
 
 lr_state *g_state = NULL;
@@ -101,7 +102,7 @@ unsigned state_pick_drive(lr_state *s)
     unsigned i, best = 0;
 
     if (s->drive_count == 0)
-        return 0;
+        return UINT32_MAX; /* caller must check */
 
     if (s->cfg.placement_policy == LR_PLACE_ROUNDROBIN) {
         unsigned idx = s->rr_next % s->drive_count;

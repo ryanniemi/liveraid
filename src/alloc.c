@@ -2,6 +2,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
 
 void alloc_init(lr_pos_allocator *a)
 {
@@ -37,6 +39,10 @@ uint32_t alloc_positions(lr_pos_allocator *a, uint32_t count)
     }
 
     /* No suitable extent found — bump allocate */
+    if (count > UINT32_MAX - a->next_free) {
+        fprintf(stderr, "liveraid: fatal: parity position namespace exhausted\n");
+        return UINT32_MAX;
+    }
     uint32_t start = a->next_free;
     a->next_free += count;
     return start;

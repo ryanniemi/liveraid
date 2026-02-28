@@ -357,6 +357,8 @@ static int lr_open(const char *path, struct fuse_file_info *fi)
 {
     lr_state *s = g_state;
 
+    /* Increment open_count before releasing the lock so the live-rebuild
+     * thread never sees open_count == 0 while we are mid-open. */
     pthread_rwlock_rdlock(&s->state_lock);
     lr_file *f = state_find_file(s, path);
     if (!f) {
@@ -365,34 +367,31 @@ static int lr_open(const char *path, struct fuse_file_info *fi)
     }
     char real[PATH_MAX];
     snprintf(real, sizeof(real), "%s", f->real_path);
+    int has_parity = (s->parity != NULL && s->parity->levels > 0);
+    f->open_count++;
     pthread_rwlock_unlock(&s->state_lock);
 
     int fd = open(real, fi->flags & ~O_CREAT);
     if (fd >= 0) {
         fi->fh = (uint64_t)fd;
-        pthread_rwlock_rdlock(&s->state_lock);
-        lr_file *f2 = state_find_file(s, path);
-        if (f2) f2->open_count++;
-        pthread_rwlock_unlock(&s->state_lock);
         return 0;
     }
 
     /* Open failed.  For read-only opens, allow recovery via parity. */
     int saved = errno;
     if ((fi->flags & O_ACCMODE) == O_RDONLY &&
-        (saved == ENOENT || saved == EIO || saved == ENXIO)) {
-        pthread_rwlock_rdlock(&s->state_lock);
-        int has_parity = (s->parity != NULL && s->parity->levels > 0);
-        if (has_parity) {
-            lr_file *f2 = state_find_file(s, path);
-            if (f2) f2->open_count++;
-        }
-        pthread_rwlock_unlock(&s->state_lock);
-        if (has_parity) {
-            fi->fh = LR_DEAD_DRIVE_FH;
-            return 0;
-        }
+        (saved == ENOENT || saved == EIO || saved == ENXIO) &&
+        has_parity) {
+        fi->fh = LR_DEAD_DRIVE_FH;
+        return 0;
     }
+
+    /* Open failed with no recovery path — undo the open_count increment. */
+    pthread_rwlock_rdlock(&s->state_lock);
+    lr_file *f2 = state_find_file(s, path);
+    if (f2 && f2->open_count > 0)
+        f2->open_count--;
+    pthread_rwlock_unlock(&s->state_lock);
     return -saved;
 }
 
@@ -502,6 +501,10 @@ static int lr_create(const char *path, mode_t mode,
     }
 
     unsigned drive_idx = state_pick_drive(s);
+    if (drive_idx == UINT32_MAX) {
+        pthread_rwlock_unlock(&s->state_lock);
+        return -ENOSPC;
+    }
     lr_drive *drive    = &s->drives[drive_idx];
 
     char real[PATH_MAX];
@@ -935,13 +938,32 @@ static int lr_flush(const char *path, struct fuse_file_info *fi)
 static int lr_fsync(const char *path, int datasync,
                     struct fuse_file_info *fi)
 {
-    (void)path; (void)datasync;
+    lr_state *s = g_state;
+    (void)datasync;
+
     if (fi->fh == LR_DEAD_DRIVE_FH)
         return -EIO;
+
+    /* Sync the real file data first */
     if (fi->fh != 0) {
         if (fdatasync((int)fi->fh) != 0)
             return -errno;
     }
+
+    /* Also flush any dirty parity positions for this file so the caller's
+     * durability guarantee extends to parity as well. */
+    if (s->journal) {
+        pthread_rwlock_rdlock(&s->state_lock);
+        lr_file *f = state_find_file(s, path);
+        uint32_t pos_start  = f ? f->parity_pos_start : 0;
+        uint32_t block_count = f ? f->block_count      : 0;
+        pthread_rwlock_unlock(&s->state_lock);
+
+        if (block_count > 0)
+            journal_mark_dirty_range(s->journal, pos_start, block_count);
+        journal_flush(s->journal);
+    }
+
     return 0;
 }
 

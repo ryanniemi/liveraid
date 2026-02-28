@@ -42,7 +42,7 @@ static void bitmap_set(lr_journal *j, uint32_t pos)
 
 /*
  * On-disk format (little-endian):
- *   magic[4]         "SLBM"
+ *   magic[4]         "LRBM"
  *   bitmap_words[4]  uint32_t
  *   bitmap data      uint64_t[bitmap_words]
  */
@@ -79,7 +79,7 @@ static void journal_bitmap_save(lr_journal *j)
         return;
     }
 
-    const uint8_t magic[4] = { 'S', 'L', 'B', 'M' };
+    const uint8_t magic[4] = { 'L', 'R', 'B', 'M' };
     if (write(fd, magic, 4) != 4 ||
         write(fd, &words, sizeof(words)) != sizeof(words) ||
         write(fd, copy, words * sizeof(uint64_t))
@@ -93,7 +93,11 @@ static void journal_bitmap_save(lr_journal *j)
     close(fd);
     free(copy);
 
-    rename(tmp, j->bitmap_path);
+    if (rename(tmp, j->bitmap_path) != 0) {
+        fprintf(stderr, "journal: failed to save bitmap '%s': %s\n",
+                j->bitmap_path, strerror(errno));
+        unlink(tmp);
+    }
 }
 
 static void journal_bitmap_load(lr_journal *j)
@@ -108,7 +112,7 @@ static void journal_bitmap_load(lr_journal *j)
     uint8_t magic[4];
     uint32_t words;
     if (read(fd, magic, 4) != 4 ||
-        memcmp(magic, "SLBM", 4) != 0 ||
+        memcmp(magic, "LRBM", 4) != 0 ||
         read(fd, &words, sizeof(words)) != sizeof(words) ||
         words == 0 || words > 0x100000 /* 64M positions max */) {
         close(fd);

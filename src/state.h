@@ -121,7 +121,7 @@ unsigned state_pick_drive(lr_state *s);
 static inline uint32_t blocks_for_size(uint64_t size, uint32_t block_size)
 {
     if (size == 0) return 0;
-    return (uint32_t)((size + block_size - 1) / block_size);
+    return (uint32_t)(size / block_size + (size % block_size != 0));
 }
 
 /*--------------------------------------------------------------------
