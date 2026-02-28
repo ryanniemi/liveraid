@@ -57,7 +57,7 @@ storage where total array loss is a worse outcome than partial file loss.
 - **Live parity**: dirty blocks queued in a bitmap; background thread drains it
 - **Transparent read recovery**: up to *np* simultaneous drive failures reconstructed from parity
 - **Transparent open on dead drive**: read-only opens succeed even when a drive is missing, routing immediately to parity recovery (no user-visible error)
-- **Full metadata survival**: file mode, uid, and gid are stored in the content file and served from stored state when the real file is unavailable
+- **Full metadata survival**: file and directory mode, uid, gid, and mtime are stored in the content file and served from stored state when the backing drive is unavailable
 - **Offline rebuild**: `./liveraid rebuild -c CONFIG -d DRIVE_NAME` reconstructs all files on a replaced drive from parity, restoring permissions and timestamps
 - **Live rebuild**: if the filesystem is mounted, `liveraid rebuild` automatically connects via a Unix domain socket and rebuilds without unmounting; files currently open are skipped and reported
 - **Crash-consistent journal**: dirty bitmap saved to disk periodically; restored on unclean remount
@@ -454,15 +454,23 @@ content file is written atomically to every configured `content` path:
 # next_free_pos: 4096
 file|1|/movies/foo.mkv|734003200|0|2792|1706745600|0|100644|1000|1000
 file|2|/docs/a.pdf|1048576|2792|4|1706745601|0|100600|1000|1000
+dir|/movies|40755|1000|1000|1706745600|0
+dir|/docs|40700|1000|1000|1706745601|0
 # crc32: A3F1CC02
 ```
 
-Fields: `file|DRIVE|VPATH|SIZE|PARITY_POS_START|BLOCK_COUNT|MTIME_SEC|MTIME_NSEC|MODE|UID|GID`
+File fields: `file|DRIVE|VPATH|SIZE|PARITY_POS_START|BLOCK_COUNT|MTIME_SEC|MTIME_NSEC|MODE|UID|GID`
 
-- `MODE` is the full `st_mode` value in octal (e.g. `100644` = regular file, permissions 0644).
+Directory fields: `dir|VPATH|MODE|UID|GID|MTIME_SEC|MTIME_NSEC`
+
+- `MODE` is the full `st_mode` value in octal (e.g. `100644` = regular file, `40755` = directory).
 - `UID` / `GID` are decimal owner and group IDs.
-- Content files from older versions that omit the last three fields default to
-  mode `100644`, uid `0`, gid `0` on load — backward compatible.
+- Directory records are written for directories that have been explicitly created
+  (`mkdir`) or had a metadata operation applied (`chmod`, `chown`, `utimens`).
+  Ancestor directories that exist implicitly because files were placed in them
+  are not recorded and report mode `0755`, uid/gid `0`, and epoch mtime.
+- Content files from older versions that omit the last three `file` fields
+  default to mode `100644`, uid `0`, gid `0` on load — backward compatible.
 
 The `# crc32:` footer is the IEEE 802.3 CRC32 of everything before that line.
 A mismatch on load prints a warning to stderr but parsing continues.
@@ -488,10 +496,11 @@ liveraid/
     │                   # init sequence, SIGUSR1/USR2 handlers, fuse_main
     ├── config.h/c      # INI-style config parser
     ├── state.h/c       # In-memory state, file table (lr_hash),
-    │                   # file list (lr_list), drive selection,
-    │                   # per-drive position index
+    │                   # file list (lr_list), dir table/list,
+    │                   # drive selection, per-drive position index
     │                   # lr_file: vpath, real_path, size, parity positions,
     │                   # mtime, mode, uid, gid
+    │                   # lr_dir: vpath, mode, uid, gid, mtime
     ├── lr_hash.h/c     # Intrusive separate-chaining hash map (FNV-1a)
     ├── lr_list.h/c     # Intrusive doubly-linked list
     ├── alloc.h/c       # Global parity-position allocator (sorted free extents + high-water mark)
@@ -531,7 +540,7 @@ Runtime dependencies: `libfuse3`, `libisal`. No external source trees required.
 **Filesystem**
 - No hard link support.
 - No xattr support.
-- Virtual directory `mtime`/`ctime` is not tracked (always reported as epoch).
+- Virtual directory `mtime`/`ctime` is only tracked for directories that have been explicitly created or had a metadata operation applied. Directories that exist implicitly because files were placed in them always report epoch mtime.
 - Write access to a file whose drive is missing returns `EIO`; use `rebuild`
   to restore the drive before writing.
 - Live rebuild skips files that are currently open; a subsequent `rebuild` run
