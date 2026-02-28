@@ -87,7 +87,7 @@ parity 2 PATH          # Level-2 parity (up to level 6; must be contiguous from 
 content PATH           # Metadata file (list multiple for redundancy)
 mountpoint PATH        # FUSE mount point
 blocksize 256          # Block size in KiB (default 256)
-placement mostfree     # mostfree | roundrobin
+placement mostfree     # mostfree | lfs | pfrd | roundrobin
 parity_threads 4       # Parallel threads for parity drain (default 1, max 64)
 ```
 

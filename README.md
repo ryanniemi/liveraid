@@ -124,7 +124,7 @@ mountpoint /srv/array
 | `content PATH` | yes (≥1) | Where to save file metadata. List multiple paths for redundancy (all are written on save, first found is loaded). |
 | `mountpoint PATH` | yes | FUSE mount point. |
 | `blocksize KiB` | no | Parity block size in KiB (default 256). Must be a multiple of 64 bytes. |
-| `placement POLICY` | no | `mostfree` (default) or `roundrobin`. |
+| `placement POLICY` | no | `mostfree` (default) — most free space; `lfs` — least free space (fill fullest drive first); `pfrd` — weighted random by free space; `roundrobin` — cycle in config order. |
 | `parity_threads N` | no | Threads used to drain the dirty-parity bitmap in parallel (default 1, max 64). Each thread processes an independent subset of dirty positions. |
 
 ## Usage

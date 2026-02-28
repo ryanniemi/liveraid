@@ -125,6 +125,10 @@ int config_load(const char *path, lr_config *cfg)
                 cfg->placement_policy = LR_PLACE_MOSTFREE;
             else if (strcmp(rest, "roundrobin") == 0)
                 cfg->placement_policy = LR_PLACE_ROUNDROBIN;
+            else if (strcmp(rest, "lfs") == 0)
+                cfg->placement_policy = LR_PLACE_LFS;
+            else if (strcmp(rest, "pfrd") == 0)
+                cfg->placement_policy = LR_PLACE_PFRD;
             else {
                 fprintf(stderr, "config:%d: unknown placement policy '%s'\n",
                         lineno, rest);
@@ -194,6 +198,9 @@ void config_dump(const lr_config *cfg)
         fprintf(stderr, "  parity[%u]: %s\n", i, cfg->parity_path[i]);
     for (i = 0; i < cfg->content_count; i++)
         fprintf(stderr, "  content[%u]: %s\n", i, cfg->content_paths[i]);
-    fprintf(stderr, "  placement: %s\n",
-            cfg->placement_policy == LR_PLACE_MOSTFREE ? "mostfree" : "roundrobin");
+    const char *placement = "mostfree";
+    if (cfg->placement_policy == LR_PLACE_ROUNDROBIN) placement = "roundrobin";
+    else if (cfg->placement_policy == LR_PLACE_LFS)   placement = "lfs";
+    else if (cfg->placement_policy == LR_PLACE_PFRD)  placement = "pfrd";
+    fprintf(stderr, "  placement: %s\n", placement);
 }

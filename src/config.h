@@ -12,6 +12,8 @@
 
 #define LR_PLACE_MOSTFREE   0
 #define LR_PLACE_ROUNDROBIN 1
+#define LR_PLACE_LFS        2   /* least free space: fill fullest drive first */
+#define LR_PLACE_PFRD       3   /* probabilistic: weighted random by free space */
 
 typedef struct {
     char name[64];

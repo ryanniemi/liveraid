@@ -25,7 +25,11 @@ mountpoint /srv/array
 # Block size in KiB (default 256, must be a multiple of 64 bytes when converted)
 #blocksize 256
 
-# Drive selection policy for new files: mostfree | roundrobin
+# Drive selection policy for new files:
+#   mostfree   - pick the drive with the most free space (default)
+#   lfs        - pick the drive with the least free space (fill fullest drive first)
+#   pfrd       - weighted random: probability proportional to free space
+#   roundrobin - cycle through drives in config order
 #placement mostfree
 
 # Number of threads used to drain the dirty-parity bitmap in parallel (default 1)

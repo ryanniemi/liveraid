@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <time.h>
 #include <sys/statvfs.h>
 
 lr_state *g_state = NULL;
@@ -156,16 +157,58 @@ unsigned state_pick_drive(lr_state *s)
         return idx;
     }
 
-    /* MOSTFREE: pick drive with most free space */
-    uint64_t best_free = 0;
+    /* Gather free-space stats used by mostfree, lfs, and pfrd */
+    uint64_t free_bytes[LR_DRIVE_MAX];
     for (i = 0; i < s->drive_count; i++) {
         struct statvfs sv;
-        if (statvfs(s->drives[i].dir, &sv) == 0) {
-            uint64_t free_bytes = (uint64_t)sv.f_bavail * sv.f_frsize;
-            if (free_bytes > best_free) {
-                best_free = free_bytes;
-                best = i;
+        free_bytes[i] = (statvfs(s->drives[i].dir, &sv) == 0)
+                        ? (uint64_t)sv.f_bavail * sv.f_frsize : 0;
+    }
+
+    if (s->cfg.placement_policy == LR_PLACE_LFS) {
+        /* Least free space: fill the fullest drive first.
+         * Skip drives with no free space at all; fall back to best=0. */
+        uint64_t least = UINT64_MAX;
+        for (i = 0; i < s->drive_count; i++) {
+            if (free_bytes[i] > 0 && free_bytes[i] < least) {
+                least = free_bytes[i];
+                best  = i;
             }
+        }
+        return best;
+    }
+
+    if (s->cfg.placement_policy == LR_PLACE_PFRD) {
+        /* Probabilistic: each drive's selection probability is proportional
+         * to its free space.  A drive with 2× the free space is 2× as likely
+         * to be chosen.  Falls back to drive 0 if all drives are full. */
+        static int seeded = 0;
+        if (!seeded) {
+            srandom((unsigned int)time(NULL));
+            seeded = 1;
+        }
+        uint64_t total_free = 0;
+        for (i = 0; i < s->drive_count; i++)
+            total_free += free_bytes[i];
+        if (total_free == 0)
+            return 0;
+        uint64_t threshold = (uint64_t)(
+            (double)random() / ((double)RAND_MAX + 1.0) * (double)total_free);
+        uint64_t accum = 0;
+        for (i = 0; i < s->drive_count; i++) {
+            accum += free_bytes[i];
+            if (threshold < accum)
+                return i;
+        }
+        return s->drive_count - 1; /* rounding fallback */
+    }
+
+    /* MOSTFREE (default): pick drive with most free space */
+    uint64_t best_free = 0;
+    for (i = 0; i < s->drive_count; i++) {
+        if (free_bytes[i] > best_free) {
+            best_free = free_bytes[i];
+            best = i;
         }
     }
     return best;
