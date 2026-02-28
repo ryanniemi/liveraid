@@ -90,5 +90,5 @@ placement mostfree     # mostfree | roundrobin
 ./liveraid -c liveraid.conf -f /srv/array     # Mount (foreground)
 fusermount3 -u /srv/array                     # Unmount
 kill -USR1 $(pidof liveraid)                  # Trigger scrub
-./liveraid rebuild -c liveraid.conf -d d1     # Rebuild drive d1 from parity
+./liveraid rebuild -c liveraid.conf -d 1      # Rebuild drive 1 from parity
 ```

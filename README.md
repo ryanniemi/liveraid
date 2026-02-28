@@ -92,13 +92,13 @@ Copy `liveraid.conf.example` and edit it:
 
 ```ini
 # Data drives: "data NAME DIR"
-data d1 /mnt/disk1/
-data d2 /mnt/disk2/
-data d3 /mnt/disk3/
+data 1 /mnt/disk1/
+data 2 /mnt/disk2/
+data 3 /mnt/disk3/
 
 # Parity files: "parity LEVEL PATH" (up to 6 levels, contiguous from 1)
 parity 1 /mnt/parity1/liveraid.parity
-#parity 2 /mnt/parity2/liveraid.parity
+parity 2 /mnt/parity2/liveraid.parity
 
 # Content file (metadata; list multiple for redundancy)
 content /var/lib/liveraid/liveraid.content
@@ -142,10 +142,10 @@ kill -USR1 $(pidof liveraid)
 
 # Rebuild a replaced drive from parity
 # If the filesystem is mounted, rebuild runs live (no unmount required)
-./liveraid rebuild -c /etc/liveraid.conf -d d1
+./liveraid rebuild -c /etc/liveraid.conf -d 1
 
 # If the filesystem is not mounted, rebuild runs offline from parity
-./liveraid rebuild -c /etc/liveraid.conf -d d1
+./liveraid rebuild -c /etc/liveraid.conf -d 1
 ```
 
 Standard FUSE options (`-d`, `-s`, `-o allow_other`, etc.) are passed through.
@@ -314,7 +314,7 @@ without unmounting. The running process handles the request under its existing
 `state_lock`, keeping parity and the file table consistent.
 
 ```sh
-./liveraid rebuild -c /etc/liveraid.conf -d d1
+./liveraid rebuild -c /etc/liveraid.conf -d 1
 ```
 
 Progress is streamed to stdout:
@@ -343,13 +343,13 @@ offline mode that opens the parity files directly:
 
 ```sh
 fusermount3 -u /srv/array
-./liveraid rebuild -c /etc/liveraid.conf -d d1
+./liveraid rebuild -c /etc/liveraid.conf -d 1
 ```
 
 Output is one line per file to stderr:
 
 ```
-rebuild: drive 'd1' (/mnt/disk1/) — 3 file(s) to reconstruct
+rebuild: drive '1' (/mnt/disk1/) — 3 file(s) to reconstruct
 rebuild: [1/3] OK   /movies/foo.mkv
 rebuild: [2/3] OK   /docs/a.pdf
 rebuild: [3/3] FAIL /photos/img.jpg
@@ -376,8 +376,8 @@ content file is written atomically to every configured `content` path:
 # version: 1
 # blocksize: 262144
 # next_free_pos: 4096
-file|d1|/movies/foo.mkv|734003200|0|2792|1706745600|0|100644|1000|1000
-file|d2|/docs/a.pdf|1048576|2792|4|1706745601|0|100600|1000|1000
+file|1|/movies/foo.mkv|734003200|0|2792|1706745600|0|100644|1000|1000
+file|2|/docs/a.pdf|1048576|2792|4|1706745601|0|100600|1000|1000
 # crc32: A3F1CC02
 ```
 

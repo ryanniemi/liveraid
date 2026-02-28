@@ -4,17 +4,16 @@
 
 # Data drives: "data NAME DIR"
 # Name must be unique; dir is the root path for that drive.
-data d1 /mnt/disk1/
-data d2 /mnt/disk2/
-data d3 /mnt/disk3/
+data 1 /mnt/disk1/
+data 2 /mnt/disk2/
+data 3 /mnt/disk3/
 
 # Parity files: "parity LEVEL PATH"
 # Level 1 = can recover 1 failed drive
 # Level 2 = can recover 2 failed drives, etc. (up to 6)
 # Levels must be contiguous starting from 1.
 parity 1 /mnt/parity1/liveraid.parity
-#parity 2 /mnt/parity2/liveraid.parity
-#parity 3 /mnt/parity3/liveraid.parity
+parity 2 /mnt/parity2/liveraid.parity
 
 # Content file (metadata; list multiple for redundancy)
 content /var/lib/liveraid/liveraid.content
