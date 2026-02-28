@@ -407,7 +407,7 @@ liveraid/
     │                   # mtime, mode, uid, gid
     ├── lr_hash.h/c     # Intrusive separate-chaining hash map (FNV-1a)
     ├── lr_list.h/c     # Intrusive doubly-linked list
-    ├── alloc.h/c       # Global parity-position bump allocator + free list
+    ├── alloc.h/c       # Global parity-position allocator (sorted free extents + bump)
     ├── metadata.h/c    # Content-file load/save (atomic write, CRC32)
     │                   # 11-field format with mode/uid/gid; backward-compat load
     ├── fuse_ops.h/c    # FUSE3 high-level operation callbacks
@@ -451,9 +451,11 @@ Runtime dependencies: `libfuse3`, `libisal`. No external source trees required.
   (or remount) is needed to recover them.
 
 **Allocator**
-- Freed position ranges are not compacted. Deleted files leave gaps in the
-  global position space that are only partially recycled (single-block free
-  list). The parity file grows monotonically; it is never truncated.
+- Freed positions are recycled within a session via a sorted free-extent list
+  with first-fit allocation and neighbor merging. However, the extent list is
+  not persisted — freed ranges from deleted files are lost on remount, so
+  `next_free` only ever grows across sessions. The parity file is never
+  truncated.
 
 ## License
 

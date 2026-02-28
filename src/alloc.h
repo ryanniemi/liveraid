@@ -9,29 +9,44 @@
  * All data drives share one global position namespace. Position K means
  * block K on each drive (zero-block if no file occupies that position on
  * that drive).
+ *
+ * Free positions are tracked as a sorted array of extents (start, count).
+ * Allocation uses first-fit search; adjacent extents are merged on free.
+ * next_free is the bump high-water mark, used when no suitable extent exists.
+ *
+ * The extent list is in-memory only; next_free is the only value persisted
+ * in the content file. Freed positions from previous sessions are not
+ * reclaimed on remount.
  */
+
 typedef struct {
-    uint32_t  next_free;    /* Next unused position */
-    uint32_t *free_list;    /* Positions returned by deleted files */
-    uint32_t  free_count;
-    uint32_t  free_cap;
+    uint32_t start;
+    uint32_t count;
+} lr_extent;
+
+typedef struct {
+    uint32_t   next_free;   /* Bump high-water mark */
+    lr_extent *extents;     /* Sorted free extents (by start position) */
+    uint32_t   ext_count;
+    uint32_t   ext_cap;
 } lr_pos_allocator;
 
 void     alloc_init(lr_pos_allocator *a);
 void     alloc_done(lr_pos_allocator *a);
 
 /*
- * Allocate `count` contiguous positions.  Returns the start position.
- * This is a simple bump allocator; freed positions are kept in free_list
- * for single-block reuse only.
+ * Allocate `count` contiguous positions. Returns the start position.
+ * Uses first-fit search through free extents, falling back to bump allocation.
+ * Passing count == 0 returns next_free without side effects (used by lr_create
+ * to probe the current high-water mark before the first write).
  */
 uint32_t alloc_positions(lr_pos_allocator *a, uint32_t count);
 
 /*
  * Return `count` contiguous positions starting at `start` to the free pool.
- * Only single-block ranges are currently recycled; multi-block ranges just
- * bump next_free on the fly, so we increment next_free to account for
- * any gap rather than fragmenting. For Phase-1 we do a simple approach.
+ * The range is inserted into the sorted extent list and merged with any
+ * adjacent free extents. If the freed range abuts next_free, the high-water
+ * mark is reclaimed.
  */
 void     free_positions(lr_pos_allocator *a, uint32_t start, uint32_t count);
 
