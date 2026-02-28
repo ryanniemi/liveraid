@@ -237,8 +237,9 @@ static int lr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                       off_t offset, struct fuse_file_info *fi,
                       enum fuse_readdir_flags flags)
 {
-    (void)offset; (void)fi; (void)flags;
+    (void)offset; (void)fi;
     lr_state *s = g_state;
+    int use_plus = (flags & FUSE_READDIR_PLUS) != 0;
 
     filler(buf, ".",  NULL, 0, 0);
     filler(buf, "..", NULL, 0, 0);
@@ -305,8 +306,27 @@ static int lr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
             name[sizeof(name)-1] = '\0';
         }
 
-        if (!SEEN_ADD(name))
-            filler(buf, name, NULL, 0, 0);
+        if (!SEEN_ADD(name)) {
+            struct stat st;
+            struct stat *stp = NULL;
+            enum fuse_fill_dir_flags fill_flags = 0;
+            if (use_plus && !slash) {
+                /* Direct file — fill stat from real path or stored metadata */
+                memset(&st, 0, sizeof(st));
+                if (lstat(f->real_path, &st) != 0) {
+                    st.st_mode         = f->mode ? f->mode : (S_IFREG | 0644);
+                    st.st_nlink        = 1;
+                    st.st_size         = f->size;
+                    st.st_uid          = f->uid;
+                    st.st_gid          = f->gid;
+                    st.st_mtim.tv_sec  = f->mtime_sec;
+                    st.st_mtim.tv_nsec = f->mtime_nsec;
+                }
+                stp        = &st;
+                fill_flags = FUSE_FILL_DIR_PLUS;
+            }
+            filler(buf, name, stp, 0, fill_flags);
+        }
         node = node->next;
     }
 
@@ -333,10 +353,17 @@ static int lr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                 char sub[PATH_MAX];
                 snprintf(sub, sizeof(sub), "%s/%s", real, de->d_name);
                 struct stat st;
-                if (de->d_type == DT_UNKNOWN && lstat(sub, &st) == 0 && !S_ISDIR(st.st_mode))
-                    continue;
+                int have_stat = 0;
+                if (de->d_type == DT_UNKNOWN || use_plus) {
+                    have_stat = (lstat(sub, &st) == 0);
+                    if (de->d_type == DT_UNKNOWN &&
+                        (!have_stat || !S_ISDIR(st.st_mode)))
+                        continue;
+                }
                 if (!SEEN_ADD(de->d_name))
-                    filler(buf, de->d_name, NULL, 0, 0);
+                    filler(buf, de->d_name,
+                           (use_plus && have_stat) ? &st : NULL, 0,
+                           (use_plus && have_stat) ? FUSE_FILL_DIR_PLUS : 0);
             }
         }
         closedir(dp);
