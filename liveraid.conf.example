@@ -22,7 +22,7 @@ content /mnt/disk1/liveraid.content
 # Mount point
 mountpoint /srv/array
 
-# Block size in KiB (default 256, must be a multiple of 64 bytes when converted)
+# Block size in KiB (default 256); the resulting byte count must be a multiple of 64
 #blocksize 256
 
 # Drive selection policy for new files:

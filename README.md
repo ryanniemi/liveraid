@@ -108,7 +108,7 @@ content /mnt/disk1/liveraid.content
 # Mount point
 mountpoint /srv/array
 
-# Block size in KiB (default 256, must be multiple of 64 bytes)
+# Block size in KiB (default 256); the resulting byte count must be a multiple of 64
 #blocksize 256
 
 # Drive selection policy for new files: mostfree | lfs | pfrd | roundrobin
@@ -342,10 +342,10 @@ Only the highest-numbered level can be removed (levels must remain contiguous).
   (or remount) is needed to recover them.
 
 **Allocator**
-- Free extents are persisted in the content file as `# free_extent:` header
-  lines and restored on remount, so deleted files' positions are reused across
-  sessions. The parity file is never truncated; its size is bounded by the
-  high-water mark of positions ever allocated.
+- Free extents are persisted in the content file as `# drive_free_extent:`
+  header lines and restored on remount, so deleted files' positions are reused
+  across sessions. The parity file is never truncated; its size is bounded by
+  the high-water mark of positions ever allocated.
 
 ## License
 
