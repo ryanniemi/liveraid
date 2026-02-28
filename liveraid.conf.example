@@ -1,0 +1,29 @@
+# liveraid.conf.example
+#
+# Copy to /etc/liveraid.conf and edit to match your setup.
+
+# Data drives: "data NAME DIR"
+# Name must be unique; dir is the root path for that drive.
+data d1 /mnt/disk1/
+data d2 /mnt/disk2/
+data d3 /mnt/disk3/
+
+# Parity files (up to 6 levels)
+# Level 1 = can recover 1 failed drive
+# Level 2 = can recover 2 failed drives, etc.
+parity   /mnt/parity1/liveraid.parity
+#2-parity /mnt/parity2/liveraid.2parity
+#3-parity /mnt/parity3/liveraid.3parity
+
+# Content file (metadata; list multiple for redundancy)
+content /var/lib/liveraid/liveraid.content
+content /mnt/disk1/liveraid.content
+
+# Mount point
+mountpoint /srv/array
+
+# Block size in KiB (default 256, must be a multiple of 64 bytes when converted)
+#blocksize 256
+
+# Drive selection policy for new files: mostfree | roundrobin
+#placement mostfree

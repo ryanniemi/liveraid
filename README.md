@@ -1,0 +1,437 @@
+# LiveRAID
+
+> [!WARNING]
+> **LiveRAID is experimental software. It will probably eat your data.**
+> Do not use it for anything you care about. There are known limitations around
+> crash recovery, the allocator never compacts freed space, and the codebase has
+> not been audited or stress-tested. Use a mature solution (ZFS, mdadm, SnapRAID)
+> for real data protection.
+
+A FUSE filesystem that merges multiple data drives into a single namespace, with
+live parity computed in the background. Files are stored whole on one drive (no
+striping), and parity is kept current via a write-back journal — writes go
+immediately to the data drive; a background thread computes and writes parity
+asynchronously.
+
+Uses Intel ISA-L (`libisal`) for Cauchy-matrix GF(2⁸) erasure coding.
+
+## Features
+
+- Merge up to 250 data drives under a single mount point (like mergerfs)
+- 1–6 parity levels using ISA-L Cauchy-matrix GF(2⁸) erasure coding with AVX2 acceleration
+- Whole-file placement: each file lives entirely on one drive (like UnRAID)
+- Live parity: dirty blocks queued in a bitmap; background thread drains it
+- Transparent read recovery: up to *np* simultaneous drive failures reconstructed from parity
+- **Transparent open on dead drive**: read-only opens succeed even when a drive is missing, routing immediately to parity recovery (no user-visible error)
+- **Full metadata survival**: file mode, uid, and gid are stored in the content file and served from stored state when the real file is unavailable
+- **Offline rebuild**: `./liveraid rebuild -c CONFIG -d DRIVE_NAME` reconstructs all files on a replaced drive from parity, restoring permissions and timestamps
+- **Live rebuild**: if the filesystem is mounted, `liveraid rebuild` automatically connects via a Unix domain socket and rebuilds without unmounting; files currently open are skipped and reported
+- Crash-consistent journal: dirty bitmap saved to disk periodically; restored on unclean remount
+- Scrub: `kill -USR1 <pid>` triggers a full parity-vs-data verification pass
+- Persistent metadata: content file saved atomically on unmount and every 5 min
+- CRC32 footer in content file detects corruption at load time
+- Drive selection: `mostfree` (default) or `roundrobin`
+
+## Requirements
+
+- Linux with FUSE3 kernel support
+- `libfuse3-dev` (`apt install libfuse3-dev`)
+- `libisal-dev` (`apt install libisal-dev`) — Intel ISA-L erasure coding
+- gcc, make, pkg-config
+
+## Build
+
+```sh
+git clone https://github.com/ryanniemi/liveraid
+cd liveraid
+make
+```
+
+The binary `liveraid` is placed in the current directory.
+
+```sh
+make clean   # remove objects and binary
+```
+
+## Configuration
+
+Copy `liveraid.conf.example` and edit it:
+
+```ini
+# Data drives: "data NAME DIR"
+data d1 /mnt/disk1/
+data d2 /mnt/disk2/
+data d3 /mnt/disk3/
+
+# Parity files (up to 6 levels)
+parity   /mnt/parity1/liveraid.parity
+2-parity /mnt/parity2/liveraid.2parity
+
+# Content file (metadata; list multiple for redundancy)
+content /var/lib/liveraid/liveraid.content
+content /mnt/disk1/liveraid.content
+
+# Mount point
+mountpoint /srv/array
+
+# Block size in KiB (default 256, must be multiple of 64 bytes)
+#blocksize 256
+
+# Drive selection policy for new files: mostfree | roundrobin
+#placement mostfree
+```
+
+**Directives:**
+
+| Directive | Required | Description |
+|-----------|----------|-------------|
+| `data NAME DIR` | yes (≥1) | Register a data drive. `NAME` is used in the content file; `DIR` is the real path on disk. |
+| `parity PATH` | no | Level-1 parity file path. |
+| `2-parity` … `6-parity PATH` | no | Additional parity levels. Must be declared in order. |
+| `content PATH` | yes (≥1) | Where to save file metadata. List multiple paths for redundancy (all are written on save, first found is loaded). |
+| `mountpoint PATH` | yes | FUSE mount point. |
+| `blocksize KiB` | no | Parity block size in KiB (default 256). Must be a multiple of 64 bytes. |
+| `placement POLICY` | no | `mostfree` (default) or `roundrobin`. |
+
+## Usage
+
+```sh
+# Mount in the foreground (useful for debugging)
+./liveraid -c /etc/liveraid.conf -f /srv/array
+
+# Mount in the background
+./liveraid -c /etc/liveraid.conf /srv/array
+
+# Unmount
+fusermount3 -u /srv/array
+
+# Trigger a scrub (verify parity against data, results to stderr)
+kill -USR1 $(pidof liveraid)
+
+# Rebuild a replaced drive from parity
+# If the filesystem is mounted, rebuild runs live (no unmount required)
+./liveraid rebuild -c /etc/liveraid.conf -d d1
+
+# If the filesystem is not mounted, rebuild runs offline from parity
+./liveraid rebuild -c /etc/liveraid.conf -d d1
+```
+
+Standard FUSE options (`-d`, `-s`, `-o allow_other`, etc.) are passed through.
+
+## How It Works
+
+### Namespace
+
+The virtual filesystem merges all data drives. Files are looked up by their
+virtual path (e.g. `/movies/foo.mkv`) in an in-memory hash table. Directories
+are synthesized: a virtual directory exists for any path prefix that appears in
+the file table.
+
+### File placement
+
+When a file is created, a drive is chosen according to `placement_policy`:
+- **mostfree**: pick the drive with the most free bytes (`statvfs`)
+- **roundrobin**: cycle through drives in order
+
+The file is stored entirely on that drive. Its real path is
+`<drive_dir>/<virtual_path>`.
+
+### Parity positions
+
+All data drives share a single global position namespace. Position *K*
+represents block *K* on every drive simultaneously. A file assigned parity
+positions [S, S+N) contributes its N blocks at those positions; any drive that
+has no file covering position K contributes a zero block at that position.
+
+```
+parity[level][K] = ec_encode_data over { drive[0][K], drive[1][K], …, drive[nd-1][K] }
+```
+
+Positions are allocated with a bump allocator: each new file is assigned a
+fresh contiguous range starting at `next_free`. Because files on different
+drives get distinct ranges by default, a position typically has data on exactly
+one drive and zeros on all others — parity at that position equals the single
+drive's block. This is still correct and recoverable; it just means the parity
+file is proportionally larger than a tightly-packed layout would require.
+
+### Write-back journal
+
+The following operations mark parity positions dirty:
+
+| Operation | Positions marked dirty |
+|-----------|------------------------|
+| `write` | Blocks touched by the write, plus any newly allocated blocks |
+| `truncate` (grow) | Newly allocated blocks |
+| `truncate` (shrink) | Freed blocks (so they are zeroed in parity) |
+| `unlink` | All blocks the deleted file occupied |
+
+Dirty positions are recorded in a per-bit bitmap (one bit per position).
+A background worker thread wakes either on signal or after a 5-second
+interval. It atomically swaps out the current bitmap, replaces it with an
+empty one, then drains the old bitmap — calling `parity_update_position` for
+each set bit while holding a read lock on the state.
+
+`parity_update_position` reads one block from each data drive at the given
+position (zero-filling when no file covers that position), calls
+`ec_encode_data(block_size, nd, np, gftbls, data, parity)` using the
+precomputed Cauchy GF tables, and writes the resulting parity blocks to the
+parity files.
+
+On unmount, `journal_flush` is called before saving metadata: it kicks the
+worker and blocks until both the bitmap is empty **and** the worker has
+finished writing the batch it is currently processing. Parity is therefore
+always consistent with the data at rest after a clean unmount.
+
+### Crash journal
+
+The in-memory dirty bitmap is saved to `<first_content_path>.bitmap` as part
+of each periodic metadata save (every 5 minutes by default). On clean unmount
+the file is deleted.
+
+On remount, if the bitmap file is found:
+
+1. The stored dirty bits are OR-ed into the fresh in-memory bitmap.
+2. A message is printed to stderr (`journal: restored dirty bitmap …`).
+3. The worker drains those positions — recomputing and writing parity — before
+   the first parity-sweep cycle completes.
+
+This bounds the stale-parity window after an unclean shutdown to at most one
+save interval (5 minutes). Positions written after the last periodic save but
+before the crash are not recorded and will have silently stale parity; running
+a scrub after remount detects them.
+
+### Scrub
+
+Send `SIGUSR1` to the mounted process to request a scrub:
+
+```sh
+kill -USR1 $(pidof liveraid)
+```
+
+The background worker picks up the request at its next wake-up (within
+`interval_ms`, default 5 s). It walks every parity position from 0 to
+`next_free`, reads all data blocks, recomputes parity via `ec_encode_data`,
+reads the stored parity, and compares them byte-for-byte. Results are
+printed to stderr:
+
+```
+scrub: 4096 positions checked, 0 parity mismatches, 0 read errors
+```
+
+A non-zero mismatch count means parity is stale for those positions (e.g.,
+after a crash). Re-triggering a write (or calling `parity_update_position`
+directly) corrects them; future recovery will then produce correct data.
+
+### Read recovery
+
+When `pread` on a data file returns `EIO`, `lr_read` attempts to reconstruct
+the block from parity:
+
+1. For the known-failed drive, zero-fill its slot as a placeholder.
+2. For every other data drive *d*: read the block at the same parity position.
+   If drive *d* also returns `EIO`, add it to the failure list (up to *np*
+   drives total; if more fail, return `EIO` to the caller).
+3. Read the lowest *nfailed* parity levels.
+4. Build an *nd×nd* decode matrix from the surviving rows of the Cauchy
+   encoding matrix, invert it with `gf_invert_matrix`, and call
+   `ec_encode_data` with the resulting decode coefficients to reconstruct all
+   failed blocks simultaneously.
+5. Copy the recovered block for the originally-requested drive to the read
+   buffer, clamped to the file range.
+
+Recovery is attempted block-by-block across the full read range; partial data
+already assembled is returned if a later block cannot be recovered.
+
+**Precondition:** parity must be current for the affected positions. Parity is
+guaranteed current after a clean unmount; after a crash, running a scrub
+(`kill -USR1`) identifies any positions with stale parity.
+
+### Drive failure handling
+
+When a drive is physically missing or returns errors, LiveRAID degrades
+gracefully at the file level:
+
+**Read-only access (transparent):** If `open(2)` on the real file fails with
+`ENOENT`, `EIO`, or `ENXIO`, and the file was opened `O_RDONLY`, and parity is
+configured, `lr_open` stores the sentinel value `LR_DEAD_DRIVE_FH` in the file
+handle and returns success. Subsequent `read` calls skip the `pread` entirely
+and go straight to the parity recovery path described above. No error is ever
+returned to the calling application; it reads the file as if the drive were
+healthy.
+
+**Metadata (mode/uid/gid/mtime):** When the real file is not accessible,
+`lr_getattr` returns the stored mode, uid, gid, and mtime from the content
+file. These values are populated at `create` time via `fstat` and updated when
+`chmod`, `chown`, or `utimens` is called on the virtual path.
+
+**Write access:** Writes to a dead drive return `EIO`; the file must be
+rebuilt before it can be written again.
+
+### Rebuild
+
+After replacing a failed drive, use `liveraid rebuild` to reconstruct all
+files that belong to that drive from parity.
+
+#### Live rebuild (filesystem mounted)
+
+When the filesystem is mounted, `liveraid rebuild` connects to the running
+process via a Unix domain socket (`<first_content_path>.ctrl`) and rebuilds
+without unmounting. The running process handles the request under its existing
+`state_lock`, keeping parity and the file table consistent.
+
+```sh
+./liveraid rebuild -c /etc/liveraid.conf -d d1
+```
+
+Progress is streamed to stdout:
+
+```
+progress 0 3 (starting)
+progress 1 3 /movies/foo.mkv
+ok /movies/foo.mkv
+progress 2 3 /docs/a.pdf
+ok /docs/a.pdf
+progress 3 3 /photos/img.jpg
+skip /photos/img.jpg busy
+done 2 0 skipped=1
+```
+
+Files that are currently open (`open_count > 0`) are skipped with
+`skip PATH busy` and counted in the `skipped=N` summary. They can be rebuilt
+in a subsequent run once they are closed.
+
+Exit status is 0 if no files failed, 1 if any failed.
+
+#### Offline rebuild (filesystem unmounted)
+
+If no running process is detected (socket absent), rebuild falls back to an
+offline mode that opens the parity files directly:
+
+```sh
+fusermount3 -u /srv/array
+./liveraid rebuild -c /etc/liveraid.conf -d d1
+```
+
+Output is one line per file to stderr:
+
+```
+rebuild: drive 'd1' (/mnt/disk1/) — 3 file(s) to reconstruct
+rebuild: [1/3] OK   /movies/foo.mkv
+rebuild: [2/3] OK   /docs/a.pdf
+rebuild: [3/3] FAIL /photos/img.jpg
+rebuild: complete — 2 rebuilt, 1 failed
+```
+
+#### Common to both modes
+
+1. Loads the content file to find all files assigned to the named drive.
+2. For each file, reconstructs every block via `parity_recover_block`.
+3. Creates the real file at `<drive_dir>/<virtual_path>` with recovered data.
+4. Restores the file's mode, uid, gid, and mtime from stored metadata.
+
+After a successful rebuild, remount (if needed) — the drive is fully
+operational.
+
+### Metadata
+
+On unmount (FUSE `destroy` callback), after `journal_flush` completes, the
+content file is written atomically to every configured `content` path:
+
+```
+# liveraid content
+# version: 1
+# blocksize: 262144
+# next_free_pos: 4096
+file|d1|/movies/foo.mkv|734003200|0|2792|1706745600|0|100644|1000|1000
+file|d2|/docs/a.pdf|1048576|2792|4|1706745601|0|100600|1000|1000
+# crc32: A3F1CC02
+```
+
+Fields: `file|DRIVE|VPATH|SIZE|PARITY_POS_START|BLOCK_COUNT|MTIME_SEC|MTIME_NSEC|MODE|UID|GID`
+
+- `MODE` is the full `st_mode` value in octal (e.g. `100644` = regular file, permissions 0644).
+- `UID` / `GID` are decimal owner and group IDs.
+- Content files from older versions that omit the last three fields default to
+  mode `100644`, uid `0`, gid `0` on load — backward compatible.
+
+The `# crc32:` footer is the IEEE 802.3 CRC32 of everything before that line.
+A mismatch on load prints a warning to stderr but parsing continues.
+
+On mount, the first readable content file is loaded to restore the file table
+and parity position allocator. The background journal worker also saves metadata
+every 5 minutes so the file table is not stale after an unclean shutdown.
+
+Alongside each periodic metadata save, the in-memory dirty-position bitmap is
+written to `<first_content_path>.bitmap` (binary: `LRBM` magic, word count,
+uint64 array). On clean unmount the bitmap file is deleted. On unclean remount,
+if the file is present, the stored bits are OR-merged into the fresh bitmap so
+stale parity positions are recomputed by the background worker.
+
+## Source Layout
+
+```
+liveraid/
+├── Makefile
+├── liveraid.conf.example
+└── src/
+    ├── main.c          # Entry point: arg parse, rebuild dispatch,
+    │                   # init sequence, SIGUSR1 handler, fuse_main
+    ├── config.h/c      # INI-style config parser
+    ├── state.h/c       # In-memory state, file table (lr_hash),
+    │                   # file list (lr_list), drive selection,
+    │                   # per-drive position index
+    │                   # lr_file: vpath, real_path, size, parity positions,
+    │                   # mtime, mode, uid, gid
+    ├── lr_hash.h/c     # Intrusive separate-chaining hash map (FNV-1a)
+    ├── lr_list.h/c     # Intrusive doubly-linked list
+    ├── alloc.h/c       # Global parity-position bump allocator + free list
+    ├── metadata.h/c    # Content-file load/save (atomic write, CRC32)
+    │                   # 11-field format with mode/uid/gid; backward-compat load
+    ├── fuse_ops.h/c    # FUSE3 high-level operation callbacks
+    │                   # Dead-drive sentinel (LR_DEAD_DRIVE_FH) in open/read/write
+    ├── parity.h/c      # Parity file I/O, ISA-L encode/recover wrappers,
+    │                   # lr_alloc_vector, parity_update_position,
+    │                   # parity_recover_block (multi-drive), parity_scrub
+    ├── journal.h/c     # Dirty-position bitmap + background worker thread
+    │                   # (parity sweep, periodic save, crash journal, scrub)
+    ├── rebuild.h/c     # Drive rebuild from parity
+    │                   # (try_live_rebuild via ctrl socket; offline fallback)
+    └── ctrl.h/c        # Unix domain socket control server
+                        # (live rebuild without unmounting; open_count busy-skip)
+```
+
+Runtime dependencies: `libfuse3`, `libisal`. No external source trees required.
+
+## Limitations
+
+**Parity / recovery**
+- Crash recovery is best-effort: the dirty bitmap is saved every 5 minutes
+  (configurable via `save_interval_s` in the source). Writes in the window
+  between two saves are not recorded; after a crash those positions may have
+  stale parity that is not flagged for recomputation. A clean unmount always
+  flushes parity and deletes the bitmap file.
+- Read recovery requires parity to be current for the affected position. A
+  crash before the background sweep can leave parity stale, resulting in
+  silently wrong recovered data. A post-crash scrub (`kill -USR1`) detects
+  such mismatches.
+- Multi-drive recovery is limited to *np* simultaneous failures (one per
+  configured parity level). With a single parity file, at most one drive can
+  be reconstructed at a time.
+
+**Filesystem**
+- No hard link support.
+- No xattr support.
+- Virtual directory `mtime`/`ctime` is not tracked (always reported as epoch).
+- Write access to a file whose drive is missing returns `EIO`; use `rebuild`
+  to restore the drive before writing.
+- Live rebuild skips files that are currently open; a subsequent `rebuild` run
+  (or remount) is needed to recover them.
+
+**Allocator**
+- Freed position ranges are not compacted. Deleted files leave gaps in the
+  global position space that are only partially recycled (single-block free
+  list). The parity file grows monotonically; it is never truncated.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

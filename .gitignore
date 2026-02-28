@@ -1,0 +1,19 @@
+# Build artifacts
+liveraid
+src/*.o
+src/*.d
+
+# Leftover build artifacts
+snaplive
+snaplive_asan
+
+# Runtime files
+*.content
+*.bitmap
+*.ctrl
+*.parity
+*.2parity
+*.3parity
+*.4parity
+*.5parity
+*.6parity
