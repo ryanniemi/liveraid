@@ -19,6 +19,8 @@ parity asynchronously.
 Because files are placed on individual drives rather than striped across all of
 them, drives can be different sizes and a new drive can be added to the array
 simply by registering it in the config — no rebalancing or resilvering needed.
+Parity protection can also be scaled up or down at any time by adding or
+removing parity files and updating the config.
 
 Uses Intel ISA-L (`libisal`) for Cauchy-matrix GF(2⁸) erasure coding.
 
@@ -48,7 +50,8 @@ storage where total array loss is a worse outcome than partial file loss.
 - **Drive merging**: up to 250 data drives under a single mount point (like mergerfs)
 - **Mixed drive sizes**: drives can be any capacity — no requirement to match sizes
 - **Easy expansion**: add a drive by registering it in the config; no rebalancing required
-- **Erasure coding**: 1–6 parity levels using ISA-L Cauchy-matrix GF(2⁸) with AVX2 acceleration
+- **Adjustable parity**: scale from 1 to 6 parity levels at any time by adding or removing parity files
+- **Erasure coding**: ISA-L Cauchy-matrix GF(2⁸) with AVX2 acceleration
 - **Whole-file placement**: each file lives entirely on one drive (like UnRAID)
 - **Live parity**: dirty blocks queued in a bitmap; background thread drains it
 - **Transparent read recovery**: up to *np* simultaneous drive failures reconstructed from parity
