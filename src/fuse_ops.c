@@ -498,7 +498,7 @@ static int lr_release(const char *path, struct fuse_file_info *fi)
         f->open_count--;
     pthread_rwlock_unlock(&s->state_lock);
 
-    if (fi->fh != 0 && fi->fh != LR_DEAD_DRIVE_FH)
+    if (fi->fh != LR_DEAD_DRIVE_FH)
         close((int)fi->fh);
     return 0;
 }
@@ -581,8 +581,9 @@ static int lr_create(const char *path, mode_t mode,
 
     pthread_rwlock_wrlock(&s->state_lock);
 
-    if (state_find_file(s, path)) {
-        lr_file *f = state_find_file(s, path);
+    lr_file *existing_f = state_find_file(s, path);
+    if (existing_f) {
+        lr_file *f = existing_f;
         int fd = open(f->real_path, fi->flags, mode);
         if (fd < 0) {
             pthread_rwlock_unlock(&s->state_lock);
@@ -693,9 +694,21 @@ static int lr_unlink(const char *path)
 /*--------------------------------------------------------------------
  * rename
  *------------------------------------------------------------------*/
+
+/* Fallback definitions in case the libc/kernel headers don't expose them */
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1u << 0)
+#endif
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE  (1u << 1)
+#endif
+
 static int lr_rename(const char *from, const char *to, unsigned int flags)
 {
-    (void)flags;
+    /* Atomic exchange of two paths is not supported */
+    if (flags & RENAME_EXCHANGE)
+        return -EINVAL;
+
     lr_state *s = g_state;
 
     pthread_rwlock_wrlock(&s->state_lock);
@@ -705,6 +718,21 @@ static int lr_rename(const char *from, const char *to, unsigned int flags)
         pthread_rwlock_unlock(&s->state_lock);
         return -ENOENT;
     }
+
+    /* Trivial self-rename */
+    if (strcmp(from, to) == 0) {
+        pthread_rwlock_unlock(&s->state_lock);
+        return 0;
+    }
+
+    /* RENAME_NOREPLACE: fail if destination already exists */
+    if ((flags & RENAME_NOREPLACE) && state_find_file(s, to)) {
+        pthread_rwlock_unlock(&s->state_lock);
+        return -EEXIST;
+    }
+
+    /* Locate existing destination entry before we modify anything */
+    lr_file *existing = state_find_file(s, to);
 
     char old_real[PATH_MAX];
     snprintf(old_real, sizeof(old_real), "%s", f->real_path);
@@ -724,11 +752,29 @@ static int lr_rename(const char *from, const char *to, unsigned int flags)
     mkdirs_p(s, f->drive_idx, new_real);
 
     if (rename(old_real, new_real) != 0) {
+        /* Rollback: restore f to its original path */
         snprintf(f->vpath,     sizeof(f->vpath),    "%s", from);
         snprintf(f->real_path, sizeof(f->real_path), "%s", old_real);
         state_insert_file(s, f);
         pthread_rwlock_unlock(&s->state_lock);
         return -errno;
+    }
+
+    /* rename() succeeded: discard the overwritten destination's state */
+    if (existing) {
+        lr_hash_remove(&s->file_table, &existing->vpath_node);
+        lr_list_remove(&s->file_list, &existing->list_node);
+        if (existing->block_count > 0) {
+            if (s->journal)
+                journal_mark_dirty_range(s->journal,
+                                         existing->parity_pos_start,
+                                         existing->block_count);
+            free_positions(&s->drives[existing->drive_idx].pos_alloc,
+                           existing->parity_pos_start,
+                           existing->block_count);
+            state_rebuild_pos_index(s, existing->drive_idx);
+        }
+        free(existing);
     }
 
     state_insert_file(s, f);
@@ -746,6 +792,10 @@ static int lr_mkdir(const char *path, mode_t mode)
 
     pthread_rwlock_wrlock(&s->state_lock);
     unsigned drive_idx = state_pick_drive(s);
+    if (drive_idx >= s->drive_count) {
+        pthread_rwlock_unlock(&s->state_lock);
+        return -ENOSPC;
+    }
     char real[PATH_MAX];
     real_path_on_drive(s, drive_idx, path, real, sizeof(real));
     pthread_rwlock_unlock(&s->state_lock);
@@ -786,14 +836,16 @@ static int lr_rmdir(const char *path)
 
     free(d);
 
+    int rc = 0;
     for (unsigned i = 0; i < count; i++) {
         pthread_rwlock_rdlock(&s->state_lock);
         char real[PATH_MAX];
         real_path_on_drive(s, i, path, real, sizeof(real));
         pthread_rwlock_unlock(&s->state_lock);
-        rmdir(real);
+        if (rmdir(real) != 0 && errno != ENOENT)
+            rc = -errno;
     }
-    return 0;
+    return rc;
 }
 
 /*--------------------------------------------------------------------

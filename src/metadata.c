@@ -268,6 +268,26 @@ int metadata_load(lr_state *s)
     for (i = 0; i < s->drive_count; i++)
         state_rebuild_pos_index(s, i);
 
+    /* Integrity check: warn if any two files on the same drive have
+     * overlapping parity position ranges (indicates a corrupt content file). */
+    for (i = 0; i < s->drive_count; i++) {
+        lr_pos_entry *idx = s->pos_index[i];
+        uint32_t     cnt  = s->pos_index_count[i];
+        for (uint32_t k = 1; k < cnt; k++) {
+            uint32_t prev_end = idx[k-1].pos_start + idx[k-1].block_count;
+            if (idx[k].pos_start < prev_end) {
+                fprintf(stderr,
+                        "metadata: WARNING: overlapping parity positions on "
+                        "drive '%s': [%u,%u) and [%u,%u) — content file may "
+                        "be corrupt\n",
+                        s->drives[i].name,
+                        idx[k-1].pos_start, prev_end,
+                        idx[k].pos_start,
+                        idx[k].pos_start + idx[k].block_count);
+            }
+        }
+    }
+
     return 0;
 }
 

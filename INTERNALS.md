@@ -202,6 +202,15 @@ dir|/docs|40700|1000|1000|1706745601|0
 # crc32: A3F1CC02
 ```
 
+Header lines (before `file|` and `dir|` records):
+
+- `# drive_next_free: NAME N` — high-water mark of the position allocator for
+  drive `NAME`; one line per drive.
+- `# drive_free_extent: NAME START COUNT` — a free position extent for drive
+  `NAME`; zero or more lines per drive, produced when positions are freed by
+  `unlink` or `truncate`. Extents are restored to the per-drive allocator on
+  load so freed positions can be reused.
+
 File fields: `file|DRIVE|VPATH|SIZE|PARITY_POS_START|BLOCK_COUNT|MTIME_SEC|MTIME_NSEC|MODE|UID|GID`
 
 Directory fields: `dir|VPATH|MODE|UID|GID|MTIME_SEC|MTIME_NSEC`
@@ -214,6 +223,8 @@ Directory fields: `dir|VPATH|MODE|UID|GID|MTIME_SEC|MTIME_NSEC`
   are not recorded and report mode `0755`, uid/gid `0`, and epoch mtime.
 - Content files from older versions that omit the last three `file` fields
   default to mode `100644`, uid `0`, gid `0` on load — backward compatible.
+- Old-format `# next_free_pos:` / `# free_extent:` global headers are silently
+  ignored on load; per-drive allocator state is derived from file records instead.
 
 The `# crc32:` footer is the IEEE 802.3 CRC32 of everything before that line.
 A mismatch on load prints a warning to stderr but parsing continues.

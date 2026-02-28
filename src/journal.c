@@ -427,12 +427,20 @@ int journal_init(lr_journal *j, struct lr_state *s, unsigned interval_ms,
 
     if (pthread_mutex_init(&j->bitmap_lock, NULL) != 0)
         return -1;
-    if (pthread_cond_init(&j->wake_cond, NULL) != 0)
+    if (pthread_cond_init(&j->wake_cond, NULL) != 0) {
+        pthread_mutex_destroy(&j->bitmap_lock);
         return -1;
-    if (pthread_cond_init(&j->drain_cond, NULL) != 0)
+    }
+    if (pthread_cond_init(&j->drain_cond, NULL) != 0) {
+        pthread_cond_destroy(&j->wake_cond);
+        pthread_mutex_destroy(&j->bitmap_lock);
         return -1;
+    }
     if (pthread_create(&j->worker, NULL, worker_thread, j) != 0) {
         j->running = 0;
+        pthread_cond_destroy(&j->drain_cond);
+        pthread_cond_destroy(&j->wake_cond);
+        pthread_mutex_destroy(&j->bitmap_lock);
         return -1;
     }
     return 0;

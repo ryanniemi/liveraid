@@ -113,7 +113,8 @@ int config_load(const char *path, lr_config *cfg)
 
         } else if (strcmp(key, "blocksize") == 0) {
             long val = strtol(rest, NULL, 10);
-            if (val <= 0 || (val * 1024) % 64 != 0) {
+            if (val <= 0 || val > (long)(UINT32_MAX / 1024) ||
+                (val * 1024) % 64 != 0) {
                 fprintf(stderr, "config:%d: bad blocksize (must be multiple of 64 bytes when in KiB)\n", lineno);
                 fclose(f);
                 return -1;
