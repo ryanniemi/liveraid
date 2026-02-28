@@ -48,6 +48,7 @@ storage where total array loss is a worse outcome than partial file loss.
 ## Features
 
 - **Drive merging**: up to 250 data drives under a single mount point (like mergerfs)
+- **Any underlying filesystem**: each data drive can use any filesystem (ext4, XFS, btrfs, etc.) — no uniformity required
 - **Mixed drive sizes**: drives can be any capacity — no requirement to match sizes
 - **Easy expansion**: add a drive by registering it in the config; no rebalancing required
 - **Adjustable parity**: scale from 1 to 6 parity levels at any time by adding or removing parity files
