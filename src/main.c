@@ -9,6 +9,7 @@
 #include "journal.h"
 #include "rebuild.h"
 #include "ctrl.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,16 +29,20 @@ static void sigusr1_handler(int sig)
 static void usage(const char *prog)
 {
     fprintf(stderr,
+        "liveraid %s\n"
+        "\n"
         "Usage: %s -c CONFIG [FUSE_OPTIONS] MOUNTPOINT\n"
+        "       %s rebuild -c CONFIG -d DRIVE_NAME\n"
         "\n"
         "Options:\n"
         "  -c CONFIG    Path to liveraid.conf\n"
         "  -d           Enable FUSE debug output\n"
         "  -f           Run in foreground\n"
+        "  -V           Print version and exit\n"
         "\n"
         "Example:\n"
         "  %s -c /etc/liveraid.conf /mnt/array\n",
-        prog, prog);
+        lr_version, prog, prog, prog);
 }
 
 int main(int argc, char *argv[])
@@ -65,6 +70,11 @@ int main(int argc, char *argv[])
             config_path = argv[++i];
         } else if (strncmp(argv[i], "-c", 2) == 0 && strlen(argv[i]) > 2) {
             config_path = argv[i] + 2;
+        } else if (strcmp(argv[i], "-V") == 0 ||
+                   strcmp(argv[i], "--version") == 0) {
+            printf("liveraid %s\n", lr_version);
+            free(fuse_argv);
+            return 0;
         } else if (strcmp(argv[i], "--help") == 0 ||
                    strcmp(argv[i], "-h") == 0) {
             show_help = 1;
@@ -162,6 +172,8 @@ int main(int argc, char *argv[])
             free(ctrl);
         }
     }
+
+    fprintf(stderr, "liveraid %s starting\n", lr_version);
 
     /* ---- Set global state and install signal handlers ---- */
     g_state = state;
