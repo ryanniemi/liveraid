@@ -12,10 +12,37 @@ liveraid is a FUSE filesystem that merges multiple data drives into a single nam
 
 ```bash
 make          # Compile binary → ./liveraid
-make clean    # Remove objects and binary
+make test     # Build and run all unit tests (no extra dependencies)
+make clean    # Remove objects, binary, and test binaries
 ```
 
 Dependencies: `libfuse3-dev`, `libisal-dev`, `gcc`, `make`, `pkg-config`.
+
+## Tests
+
+Unit tests live in `tests/`. Each module has its own binary; all are built and
+run by `make test`. Tests use a minimal header-only harness (`tests/test_harness.h`)
+with no external test framework required.
+
+| Binary | Source module(s) | What is tested |
+|--------|-----------------|----------------|
+| `tests/test_alloc` | `src/alloc.c` | `alloc_positions` / `free_positions`: sequential alloc, free with neighbor merging, extent reuse, first-fit skip, bump fallback |
+| `tests/test_hash` | `src/lr_hash.c` | Insert, find, remove; bucket growth; same-bucket chain removal; FNV-1a stability |
+| `tests/test_list` | `src/lr_list.c` | Insert-tail; remove from head, tail, middle, and sole element |
+| `tests/test_state` | `src/state.c` + support | File and dir CRUD; `blocks_for_size`; position-index binary search; round-robin drive selection |
+| `tests/test_metadata` | `src/metadata.c` + support | Save/load roundtrip (all 11 file fields, all dir fields); fresh-start with no content file; old 8-field format compatibility; allocator state persistence across save/load |
+| `tests/test_config` | `src/config.c` | Valid configs; default values; all placement policies; parity levels and gap detection; error paths (no drives, no content, no mountpoint, bad blocksize, bad parity_threads); unknown directives (non-fatal); comments and blank lines |
+
+### Test conventions
+
+- Tests are self-contained: they use `/tmp` for any files they create and clean
+  up after themselves. No real drives, parity files, or FUSE mounts are needed.
+- `make_config` helpers in each test file use `LR_PLACE_ROUNDROBIN` so
+  drive-selection tests never call `statvfs` on real paths.
+- Error-path tests (config validation failures, etc.) produce expected messages
+  on stderr — this is normal and not a test failure.
+- When adding a new source module, add a corresponding `tests/test_<module>.c`
+  and a rule in the `Makefile` test section following the existing pattern.
 
 ## Architecture
 
@@ -25,6 +52,14 @@ Dependencies: `libfuse3-dev`, `libisal-dev`, `gcc`, `make`, `pkg-config`.
 ./
 ├── Makefile
 ├── liveraid.conf.example
+├── tests/
+│   ├── test_harness.h      # Minimal ASSERT / RUN / REPORT macros
+│   ├── test_alloc.c
+│   ├── test_hash.c
+│   ├── test_list.c
+│   ├── test_state.c
+│   ├── test_metadata.c
+│   └── test_config.c
 └── src/
     ├── main.c          # Entry point: arg parse, rebuild dispatch,
     │                   # SIGUSR1/USR2 handlers, fuse_main
