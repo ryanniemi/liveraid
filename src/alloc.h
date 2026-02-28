@@ -4,19 +4,20 @@
 #include <stdint.h>
 
 /*
- * Global parity-position allocator.
+ * Per-drive parity-position allocator.
  *
- * All data drives share one global position namespace. Position K means
- * block K on each drive (zero-block if no file occupies that position on
- * that drive).
+ * Each data drive has its own independent position namespace. Position K
+ * on drive D means block K of that drive's files and the corresponding
+ * block in each parity file. Drives with no file at position K contribute
+ * a zero block; parity at that position covers only the drive(s) that
+ * actually have data there.
  *
  * Free positions are tracked as a sorted array of extents (start, count).
  * Allocation uses first-fit search; adjacent extents are merged on free.
  * next_free is the bump high-water mark, used when no suitable extent exists.
  *
- * The extent list is in-memory only; next_free is the only value persisted
- * in the content file. Freed positions from previous sessions are not
- * reclaimed on remount.
+ * Both next_free and the extent list are persisted in the content file
+ * (as drive_next_free / drive_free_extent header lines) and restored on load.
  */
 
 typedef struct {

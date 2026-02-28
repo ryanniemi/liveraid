@@ -23,23 +23,28 @@ The file is stored entirely on that drive. Its real path is
 
 ### Parity positions
 
-All data drives share a single global position namespace. Position *K*
-represents block *K* on every drive simultaneously. A file assigned parity
-positions [S, S+N) contributes its N blocks at those positions; any drive that
-has no file covering position K contributes a zero block at that position.
+Each data drive has its own independent position namespace. Position *K* on
+drive *D* represents block *K* of that drive's files; position numbers on
+different drives are unrelated and may overlap. A file on drive *D* assigned
+parity positions [S, S+N) occupies blocks S through S+N-1 in drive *D*'s
+namespace. The parity computation uses all drives' data at the same position *K*:
+drives with no file at position *K* contribute a zero block.
 
 ```
 parity[level][K] = ec_encode_data over { drive[0][K], drive[1][K], …, drive[nd-1][K] }
 ```
 
-Positions are allocated from a sorted free-extent list (first-fit), falling
-back to advancing the `next_free` high-water mark when no suitable free range
-exists. Freed ranges are returned to the extent list with neighbor merging and
-are persisted across remounts in the content file. Because files on different
-drives get distinct ranges, a position typically has data on exactly one drive
-and zeros on all others — parity at that position equals the single drive's
-block. This is still correct and recoverable; it just means the parity file is
-proportionally larger than a tightly-packed layout would require.
+Each drive has its own sorted free-extent allocator. Positions are allocated
+first-fit from free extents, falling back to the per-drive `next_free`
+high-water mark. Freed ranges are merged with neighbors and persisted in the
+content file as `# drive_next_free:` and `# drive_free_extent:` header lines.
+
+Because files on different drives share a position namespace, multiple drives
+may have data at the same position K simultaneously. The parity file therefore
+needs capacity equal to `max(drive[d].next_free) × block_size` — roughly the
+size of the single largest drive, not the total data across all drives. See the
+[Storage overhead](README.md#storage-overhead) section in README.md for
+guidance on parity capacity planning and block size selection.
 
 ### Write-back journal
 
@@ -188,9 +193,10 @@ content file is written atomically to every configured `content` path:
 # liveraid content
 # version: 1
 # blocksize: 262144
-# next_free_pos: 4096
+# drive_next_free: 1 2792
+# drive_next_free: 2 4
 file|1|/movies/foo.mkv|734003200|0|2792|1706745600|0|100644|1000|1000
-file|2|/docs/a.pdf|1048576|2792|4|1706745601|0|100600|1000|1000
+file|2|/docs/a.pdf|1048576|0|4|1706745601|0|100600|1000|1000
 dir|/movies|40755|1000|1000|1706745600|0
 dir|/docs|40700|1000|1000|1706745601|0
 # crc32: A3F1CC02

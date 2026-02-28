@@ -370,7 +370,11 @@ int parity_scrub(lr_state *s, lr_scrub_result *result, int repair)
         return -1;
 
     pthread_rwlock_rdlock(&s->state_lock);
-    uint32_t max_pos = s->pos_alloc.next_free;
+    uint32_t max_pos = 0;
+    for (unsigned d = 0; d < s->drive_count; d++) {
+        if (s->drives[d].pos_alloc.next_free > max_pos)
+            max_pos = s->drives[d].pos_alloc.next_free;
+    }
     pthread_rwlock_unlock(&s->state_lock);
 
     for (uint32_t pos = 0; pos < max_pos; pos++) {

@@ -23,11 +23,11 @@ struct lr_ctrl;
  * Per-drive runtime info
  *------------------------------------------------------------------*/
 typedef struct lr_drive {
-    char     name[64];
-    char     dir[PATH_MAX];    /* absolute path including trailing '/' */
-    unsigned idx;              /* index in state.drives[] */
-    /* Round-robin counter: last file index assigned to this drive */
-    uint32_t rr_seq;
+    char             name[64];
+    char             dir[PATH_MAX];    /* absolute path including trailing '/' */
+    unsigned         idx;              /* index in state.drives[] */
+    uint32_t         rr_seq;           /* round-robin counter */
+    lr_pos_allocator pos_alloc;        /* per-drive parity position allocator */
 } lr_drive;
 
 /*--------------------------------------------------------------------
@@ -88,8 +88,6 @@ typedef struct lr_state {
 
     lr_hash           dir_table;    /* vpath → lr_dir* (explicit dirs) */
     lr_list           dir_list;     /* all lr_dir* for iteration/save */
-
-    lr_pos_allocator  pos_alloc;
 
     struct lr_parity_handle *parity;
     struct lr_journal        *journal;

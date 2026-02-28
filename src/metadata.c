@@ -65,7 +65,6 @@ int metadata_load(lr_state *s)
     }
 
     uint32_t file_block_size = s->cfg.block_size;
-    uint32_t max_pos = 0;
     uint32_t running_crc = 0xFFFFFFFFU;
     unsigned content_idx = i; /* save index of loaded content path for CRC message */
 
@@ -95,18 +94,37 @@ int metadata_load(lr_state *s)
         if (len > 1 && p[len-2] == '\r') p[len-2] = '\0';
 
         /* Parse known header directives before skipping all '#' lines */
-        if (strncmp(p, "# next_free_pos:", 16) == 0) {
-            uint32_t nfp = (uint32_t)strtoul(p + 16, NULL, 10);
-            if (nfp > s->pos_alloc.next_free)
-                s->pos_alloc.next_free = nfp;
+        if (strncmp(p, "# drive_next_free:", 18) == 0) {
+            char dname[64]; uint32_t nfp;
+            if (sscanf(p + 18, "%63s %u", dname, &nfp) == 2) {
+                for (unsigned di = 0; di < s->drive_count; di++) {
+                    if (strcmp(s->drives[di].name, dname) == 0) {
+                        if (nfp > s->drives[di].pos_alloc.next_free)
+                            s->drives[di].pos_alloc.next_free = nfp;
+                        break;
+                    }
+                }
+            }
             continue;
         }
-        if (strncmp(p, "# free_extent:", 14) == 0) {
-            uint32_t start, count;
-            if (sscanf(p + 14, "%u %u", &start, &count) == 2)
-                free_positions(&s->pos_alloc, start, count);
+        if (strncmp(p, "# drive_free_extent:", 20) == 0) {
+            char dname[64]; uint32_t start, cnt;
+            if (sscanf(p + 20, "%63s %u %u", dname, &start, &cnt) == 3) {
+                for (unsigned di = 0; di < s->drive_count; di++) {
+                    if (strcmp(s->drives[di].name, dname) == 0) {
+                        free_positions(&s->drives[di].pos_alloc, start, cnt);
+                        break;
+                    }
+                }
+            }
             continue;
         }
+        /* old global format: next_free_pos / free_extent — ignored on upgrade;
+         * per-drive next_free is derived from file records below instead */
+        if (strncmp(p, "# next_free_pos:", 16) == 0)
+            continue;
+        if (strncmp(p, "# free_extent:", 14) == 0)
+            continue;
 
         /* Skip remaining comments/empty lines */
         if (p[0] == '#' || p[0] == '\0')
@@ -228,11 +246,6 @@ int metadata_load(lr_state *s)
         if (!file->mode)
             file->mode = S_IFREG | 0644; /* default for old-format files */
 
-        /* Track max position so we can restore pos_alloc.next_free */
-        uint32_t end = file->parity_pos_start + file->block_count;
-        if (end > max_pos)
-            max_pos = end;
-
         /* Validate block_count against size */
         uint32_t expected = blocks_for_size((uint64_t)file->size, file_block_size);
         if (file->block_count != expected) {
@@ -241,14 +254,15 @@ int metadata_load(lr_state *s)
             file->block_count = expected;
         }
 
+        /* Ensure this drive's allocator covers this file's position range */
+        uint32_t end = file->parity_pos_start + file->block_count;
+        if (end > s->drives[drive_idx].pos_alloc.next_free)
+            s->drives[drive_idx].pos_alloc.next_free = end;
+
         state_insert_file(s, file);
     }
 
     fclose(f);
-
-    /* Restore allocator state */
-    if (max_pos > s->pos_alloc.next_free)
-        s->pos_alloc.next_free = max_pos;
 
     /* Rebuild position indexes */
     for (i = 0; i < s->drive_count; i++)
@@ -279,11 +293,15 @@ static int write_to_path(lr_state *s, const char *path)
     fprintf(mf, "# liveraid content\n");
     fprintf(mf, "# version: %d\n", META_VERSION);
     fprintf(mf, "# blocksize: %u\n", s->cfg.block_size);
-    fprintf(mf, "# next_free_pos: %u\n", s->pos_alloc.next_free);
-    for (uint32_t i = 0; i < s->pos_alloc.ext_count; i++)
-        fprintf(mf, "# free_extent: %u %u\n",
-                s->pos_alloc.extents[i].start,
-                s->pos_alloc.extents[i].count);
+    for (unsigned d = 0; d < s->drive_count; d++) {
+        lr_pos_allocator *pa = &s->drives[d].pos_alloc;
+        fprintf(mf, "# drive_next_free: %s %u\n", s->drives[d].name, pa->next_free);
+        for (uint32_t ei = 0; ei < pa->ext_count; ei++)
+            fprintf(mf, "# drive_free_extent: %s %u %u\n",
+                    s->drives[d].name,
+                    pa->extents[ei].start,
+                    pa->extents[ei].count);
+    }
 
     lr_list_node *node = lr_list_head(&s->file_list);
     while (node) {

@@ -33,7 +33,7 @@ Dependencies: `libfuse3-dev`, `libisal-dev`, `gcc`, `make`, `pkg-config`.
     │                   # dir table/list (lr_dir), drive selection, per-drive position index
     ├── lr_hash.h/c     # Intrusive separate-chaining hash map (FNV-1a)
     ├── lr_list.h/c     # Intrusive doubly-linked list
-    ├── alloc.h/c       # Global parity-position allocator + free list
+    ├── alloc.h/c       # Per-drive parity-position allocator + free list
     ├── metadata.h/c    # Content-file load/save (atomic write, CRC32)
     ├── fuse_ops.h/c    # FUSE3 high-level operation callbacks
     ├── parity.h/c      # Parity file I/O, ISA-L encode/recover/scrub/repair wrappers
@@ -45,7 +45,7 @@ Dependencies: `libfuse3-dev`, `libisal-dev`, `gcc`, `make`, `pkg-config`.
 
 ### Core Concepts
 
-**State Management**: `src/state.h` + `src/state.c` — `lr_state` owns all filesystem metadata: file table (`lr_hash`), ordered file list (`lr_list`), directory table and list (`lr_dir`), drive array, parity handle, position allocator, rwlock.
+**State Management**: `src/state.h` + `src/state.c` — `lr_state` owns all filesystem metadata: file table (`lr_hash`), ordered file list (`lr_list`), directory table and list (`lr_dir`), drive array (each `lr_drive` holds its own `lr_pos_allocator`), parity handle, rwlock.
 
 **File Model**: Each `lr_file` stores vpath, drive index, real path on disk, size, parity position range `[pos_start, pos_start+block_count)`, mtime, mode, uid, gid, and open_count.
 
@@ -66,9 +66,9 @@ Dependencies: `libfuse3-dev`, `libisal-dev`, `gcc`, `make`, `pkg-config`.
 - `lr_state` (`state.h`) — root state object
 - `lr_file` — file metadata: vpath, drive, size, parity positions, mtime, mode, uid, gid, open_count
 - `lr_dir` — directory metadata: vpath, mode, uid, gid, mtime
-- `lr_drive` — drive name + directory path
+- `lr_drive` — drive name, directory path, and per-drive `lr_pos_allocator`
 - `lr_parity_handle` — open parity file descriptors + ISA-L encoding tables
-- `lr_pos_allocator` — sorted free-extent allocator for global parity position namespace
+- `lr_pos_allocator` — sorted free-extent allocator; one per drive (embedded in `lr_drive`)
 
 ### Limits
 

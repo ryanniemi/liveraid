@@ -615,7 +615,7 @@ static int lr_create(const char *path, mode_t mode,
         return -saved;
     }
 
-    uint32_t pos_start = alloc_positions(&s->pos_alloc, 0);
+    uint32_t pos_start = alloc_positions(&s->drives[drive_idx].pos_alloc, 0);
 
     lr_file *f = calloc(1, sizeof(lr_file));
     if (!f) {
@@ -683,7 +683,7 @@ static int lr_unlink(const char *path)
     free(f);
 
     unlink(real);
-    free_positions(&s->pos_alloc, pos_start, block_count);
+    free_positions(&s->drives[drive_idx].pos_alloc, pos_start, block_count);
     state_rebuild_pos_index(s, drive_idx);
 
     pthread_rwlock_unlock(&s->state_lock);
@@ -826,19 +826,20 @@ static int lr_truncate(const char *path, off_t size,
     f->size        = (int64_t)size;
     f->block_count = new_blocks;
 
+    lr_pos_allocator *pa = &s->drives[f->drive_idx].pos_alloc;
     if (new_blocks > old_blocks) {
         uint32_t dirty_start, dirty_count;
         if (old_blocks == 0) {
-            f->parity_pos_start = alloc_positions(&s->pos_alloc, new_blocks);
+            f->parity_pos_start = alloc_positions(pa, new_blocks);
             dirty_start = f->parity_pos_start;
             dirty_count = new_blocks;
-        } else if (f->parity_pos_start + old_blocks == s->pos_alloc.next_free) {
+        } else if (f->parity_pos_start + old_blocks == pa->next_free) {
             dirty_start = f->parity_pos_start + old_blocks;
             dirty_count = new_blocks - old_blocks;
-            s->pos_alloc.next_free += dirty_count;
+            pa->next_free += dirty_count;
         } else {
-            free_positions(&s->pos_alloc, f->parity_pos_start, old_blocks);
-            f->parity_pos_start = alloc_positions(&s->pos_alloc, new_blocks);
+            free_positions(pa, f->parity_pos_start, old_blocks);
+            f->parity_pos_start = alloc_positions(pa, new_blocks);
             dirty_start = f->parity_pos_start;
             dirty_count = new_blocks;
         }
@@ -849,7 +850,7 @@ static int lr_truncate(const char *path, off_t size,
             journal_mark_dirty_range(s->journal,
                                      f->parity_pos_start + new_blocks,
                                      old_blocks - new_blocks);
-        free_positions(&s->pos_alloc,
+        free_positions(pa,
                        f->parity_pos_start + new_blocks,
                        old_blocks - new_blocks);
     }
@@ -1136,18 +1137,19 @@ static int lr_write2(const char *path, const char *buf, size_t size,
                 (uint64_t)(new_end > f->size ? new_end : f->size), bs);
         uint32_t dirty_start = 0, dirty_count = 0;
 
+        lr_pos_allocator *pa = &s->drives[f->drive_idx].pos_alloc;
         if (new_blocks > old_blocks) {
             if (old_blocks == 0) {
-                f->parity_pos_start = alloc_positions(&s->pos_alloc, new_blocks);
+                f->parity_pos_start = alloc_positions(pa, new_blocks);
                 dirty_start = f->parity_pos_start;
                 dirty_count = new_blocks;
-            } else if (f->parity_pos_start + old_blocks == s->pos_alloc.next_free) {
+            } else if (f->parity_pos_start + old_blocks == pa->next_free) {
                 dirty_start = f->parity_pos_start + old_blocks;
                 dirty_count = new_blocks - old_blocks;
-                s->pos_alloc.next_free += dirty_count;
+                pa->next_free += dirty_count;
             } else {
-                free_positions(&s->pos_alloc, f->parity_pos_start, old_blocks);
-                f->parity_pos_start = alloc_positions(&s->pos_alloc, new_blocks);
+                free_positions(pa, f->parity_pos_start, old_blocks);
+                f->parity_pos_start = alloc_positions(pa, new_blocks);
                 dirty_start = f->parity_pos_start;
                 dirty_count = new_blocks;
             }

@@ -28,6 +28,7 @@ int state_init(lr_state *s, const lr_config *cfg)
             }
         }
         d->idx = i;
+        alloc_init(&d->pos_alloc);
     }
     s->drive_count = cfg->drive_count;
 
@@ -36,8 +37,6 @@ int state_init(lr_state *s, const lr_config *cfg)
 
     lr_hash_init(&s->dir_table);
     lr_list_init(&s->dir_list);
-
-    alloc_init(&s->pos_alloc);
 
     if (pthread_rwlock_init(&s->state_lock, NULL) != 0) {
         fprintf(stderr, "state_init: rwlock_init failed\n");
@@ -69,7 +68,8 @@ void state_done(lr_state *s)
     }
     lr_hash_done(&s->dir_table);
 
-    alloc_done(&s->pos_alloc);
+    for (i = 0; i < s->drive_count; i++)
+        alloc_done(&s->drives[i].pos_alloc);
 
     for (i = 0; i < LR_DRIVE_MAX; i++) {
         free(s->pos_index[i]);

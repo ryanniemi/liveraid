@@ -127,6 +127,52 @@ mountpoint /srv/array
 | `placement POLICY` | no | `mostfree` (default) — most free space; `lfs` — least free space (fill fullest drive first); `pfrd` — weighted random by free space; `roundrobin` — cycle in config order. |
 | `parity_threads N` | no | Threads used to drain the dirty-parity bitmap in parallel (default 1, max 64). Each thread processes an independent subset of dirty positions. |
 
+## Storage overhead
+
+### Parity file size
+
+Like traditional RAID-5, **each parity level requires capacity roughly equal
+to the largest single data drive**. Each drive has its own independent position
+namespace, so files on different drives can occupy the same position number.
+The parity file needs to cover `max(drive.next_free) × block_size` — dominated
+by the drive with the most data, not the total across all drives:
+
+| Array | Largest drive | Parity (1 level) | Parity (2 levels) |
+|-------|---------------|------------------|-------------------|
+| 5 × 10 TB (balanced) | ~10 TB | ~10 TB | ~20 TB |
+| 3 × 8 TB + 2 × 4 TB | 8 TB | ~8 TB | ~16 TB |
+
+Plan your parity drive(s) accordingly — a single parity file needs capacity
+equal to the largest data drive, similar to a traditional RAID-5 parity disk.
+
+The parity file is never truncated; its size grows to the high-water mark of
+positions ever allocated across all drives. Deleted files' positions are
+reclaimed and reused per drive, so it does not grow without bound, but it
+does not shrink either.
+
+### Block size
+
+Every file occupies `⌈file_size / block_size⌉` parity positions; the final
+block is zero-padded. The average wasted parity space per file is
+`block_size / 2`. For a collection of large files this is negligible; for
+many small files it adds up.
+
+Each dirty parity position also requires reading one full block from every
+data drive to recompute parity (`nd × block_size` bytes of reads per
+position update). Smaller blocks reduce this per-update I/O cost.
+
+As a rule of thumb, choose a block size no larger than about one tenth of
+your average file size, so last-block rounding waste stays below ~10%:
+
+| Typical file sizes | Suggested block size |
+|--------------------|----------------------|
+| > 2.5 MiB (movies, ISOs, backups) | 256 KiB (default) |
+| 256 KiB – 2.5 MiB | 64 KiB |
+| < 256 KiB | 16 KiB or smaller |
+
+The block size is fixed at array-creation time and stored in the content
+file. Changing it requires rebuilding the array from scratch.
+
 ## Usage
 
 ```sh
