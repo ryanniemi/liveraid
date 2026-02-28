@@ -8,29 +8,52 @@
 > for real data protection.
 
 A FUSE filesystem that merges multiple data drives into a single namespace, with
-live parity computed in the background. Files are stored whole on one drive (no
-striping), and parity is kept current via a write-back journal — writes go
-immediately to the data drive; a background thread computes and writes parity
-asynchronously.
+live parity computed in the background. Unlike traditional striped RAID, files
+are stored whole on a single drive — so if you lose more drives than you have
+parity levels, only the files on those specific drives are gone. Everything on
+the surviving drives remains fully intact and directly readable. Parity is kept
+current via a write-back journal: writes go immediately to the data drive, and
+a background thread computes and writes parity asynchronously.
 
 Uses Intel ISA-L (`libisal`) for Cauchy-matrix GF(2⁸) erasure coding.
 
+### The key difference from traditional RAID
+
+Traditional striped RAID (RAID-5, RAID-6, etc.) spreads every file's data
+across all drives. This means that if you lose more drives than you have parity
+levels, **every file on the entire array becomes unrecoverable** — even files
+that had nothing to do with the failed drives.
+
+LiveRAID stores each file whole on a single drive. Parity is still computed
+across the array and can recover any drive's contents, but critically: losing
+more drives than you have parity levels only affects **the files that were
+physically on those specific drives**. All files on the surviving drives remain
+fully intact and directly readable — no recovery needed. You lose some files,
+not everything.
+
+For example, with 10 data drives and 1 parity drive:
+- **RAID-5**: lose any 2 drives → entire array unrecoverable
+- **LiveRAID**: lose any 2 drives → files on those 2 drives unrecoverable, files on the other 8 drives untouched
+
+This makes LiveRAID a better fit for large media collections and archival
+storage where total array loss is a worse outcome than partial file loss.
+
 ## Features
 
-- Merge up to 250 data drives under a single mount point (like mergerfs)
-- 1–6 parity levels using ISA-L Cauchy-matrix GF(2⁸) erasure coding with AVX2 acceleration
-- Whole-file placement: each file lives entirely on one drive (like UnRAID)
-- Live parity: dirty blocks queued in a bitmap; background thread drains it
-- Transparent read recovery: up to *np* simultaneous drive failures reconstructed from parity
+- **Drive merging**: up to 250 data drives under a single mount point (like mergerfs)
+- **Erasure coding**: 1–6 parity levels using ISA-L Cauchy-matrix GF(2⁸) with AVX2 acceleration
+- **Whole-file placement**: each file lives entirely on one drive (like UnRAID)
+- **Live parity**: dirty blocks queued in a bitmap; background thread drains it
+- **Transparent read recovery**: up to *np* simultaneous drive failures reconstructed from parity
 - **Transparent open on dead drive**: read-only opens succeed even when a drive is missing, routing immediately to parity recovery (no user-visible error)
 - **Full metadata survival**: file mode, uid, and gid are stored in the content file and served from stored state when the real file is unavailable
 - **Offline rebuild**: `./liveraid rebuild -c CONFIG -d DRIVE_NAME` reconstructs all files on a replaced drive from parity, restoring permissions and timestamps
 - **Live rebuild**: if the filesystem is mounted, `liveraid rebuild` automatically connects via a Unix domain socket and rebuilds without unmounting; files currently open are skipped and reported
-- Crash-consistent journal: dirty bitmap saved to disk periodically; restored on unclean remount
-- Scrub: `kill -USR1 <pid>` triggers a full parity-vs-data verification pass
-- Persistent metadata: content file saved atomically on unmount and every 5 min
-- CRC32 footer in content file detects corruption at load time
-- Drive selection: `mostfree` (default) or `roundrobin`
+- **Crash-consistent journal**: dirty bitmap saved to disk periodically; restored on unclean remount
+- **Scrub**: `kill -USR1 <pid>` triggers a full parity-vs-data verification pass
+- **Persistent metadata**: content file saved atomically on unmount and every 5 min
+- **CRC32 integrity**: content file footer detects corruption at load time
+- **Drive selection**: `mostfree` (default) or `roundrobin`
 
 ## Requirements
 
