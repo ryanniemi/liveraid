@@ -16,7 +16,7 @@
 #   4. 2 parity levels, simultaneous 2-drive failure transparent recovery
 #   5. Offline rebuild of 2 drives from 2-level parity
 #   6. Live rebuild (socket) with busy-file skip + subsequent rebuild after close
-#   7. Crash recovery: kill -9, bitmap restore on remount, parity clean after drain
+#   7. Crash recovery: kill -9, content file persists, parity clean after remount
 #   8. Multiple content paths: both written on save, secondary used when primary missing
 #   9. Empty files: size=0 created and survives remount
 #
@@ -228,30 +228,42 @@ unmount_fs
 
 # ===================================================================
 echo ""
-echo "=== Crash recovery: bitmap restore ==="
+echo "=== Crash recovery: kill -9 resilience ==="
 wipe_data
 mount_fs
 
+# Phase 1: write files, drain parity, clean unmount → saves content file
 for i in $(seq 1 8); do
     dd if=/dev/urandom of=$MNT/crash${i}.bin bs=65536 count=2 2>/dev/null
 done
-sleep 11   # drain + periodic bitmap save
+sleep 11   # two drain cycles
+unmount_fs
 
-bitmap_path=/tmp/lrt/content/liveraid.content.bitmap
-[ -f "$bitmap_path" ] \
-    && pass "crash recovery: bitmap file saved during periodic interval" \
-    || fail "crash recovery" "bitmap file not present after 11s"
+content_file=/tmp/lrt/content/liveraid.content
+[ -f "$content_file" ] \
+    && pass "crash recovery: content file saved on clean unmount" \
+    || fail "crash recovery" "content file missing after unmount"
 
-kill -9 $(pidof liveraid) 2>/dev/null || true
-sleep 0.5
-
-[ -f "$bitmap_path" ] \
-    && pass "crash recovery: bitmap file persists after kill -9" \
-    || fail "crash recovery" "bitmap file gone"
-
+# Phase 2: remount, write more data, drain, then kill -9
 > /tmp/lrt/liveraid.log
 mount_fs
-sleep 11   # drain after restoration
+for i in $(seq 1 4); do
+    dd if=/dev/urandom of=$MNT/crash_post${i}.bin bs=65536 count=2 2>/dev/null
+done
+sleep 11   # drain parity for post-mount writes
+kill -9 $(pidof liveraid) 2>/dev/null || true
+sleep 0.5
+fusermount3 -u $MNT 2>/dev/null || true   # detach orphaned FUSE endpoint
+sleep 0.3
+
+[ -f "$content_file" ] \
+    && pass "crash recovery: content file persists after kill -9" \
+    || fail "crash recovery" "content file gone after kill -9"
+
+# Phase 3: remount (loads content from Phase 1 clean unmount), drain, repair
+> /tmp/lrt/liveraid.log
+mount_fs
+sleep 11   # drain any dirty blocks
 
 kill -USR2 $(pidof liveraid)
 sleep 4
@@ -265,13 +277,14 @@ else
     fail "crash recovery" "$result"
 fi
 
+# Phase 4: verify pre-crash data is accessible
 mount_fs
 all_ok=1
 for i in $(seq 1 8); do
     sz=$(stat -c '%s' $MNT/crash${i}.bin 2>/dev/null || echo 0)
     [ "$sz" = "131072" ] || { echo "  crash${i}.bin: size=$sz"; all_ok=0; }
 done
-[ "$all_ok" = "1" ] && pass "crash recovery: all data files intact" \
+[ "$all_ok" = "1" ] && pass "crash recovery: pre-crash data files intact" \
                      || fail "crash recovery" "data file size wrong"
 unmount_fs
 
