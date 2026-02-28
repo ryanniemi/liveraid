@@ -1,6 +1,8 @@
 # AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI coding agents working with this repository.
+For user-facing documentation see [README.md](README.md); for implementation
+details see [INTERNALS.md](INTERNALS.md).
 
 ## Project Overview
 
