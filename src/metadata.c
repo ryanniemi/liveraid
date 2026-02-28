@@ -112,6 +112,41 @@ int metadata_load(lr_state *s)
         if (p[0] == '#' || p[0] == '\0')
             continue;
 
+        /* Directory records: dir|VPATH|MODE|UID|GID|MTIME_SEC|MTIME_NSEC */
+        if (strncmp(p, "dir|", 4) == 0) {
+            char buf[4096];
+            strncpy(buf, p + 4, sizeof(buf) - 1);
+            buf[sizeof(buf)-1] = '\0';
+
+            char *tok;
+            char *vpath    = buf;
+            tok = strchr(vpath, '|'); if (!tok) continue; *tok++ = '\0';
+            char *mode_s   = tok;
+            tok = strchr(mode_s, '|'); if (!tok) continue; *tok++ = '\0';
+            char *uid_s    = tok;
+            tok = strchr(uid_s, '|'); if (!tok) continue; *tok++ = '\0';
+            char *gid_s    = tok;
+            tok = strchr(gid_s, '|'); if (!tok) continue; *tok++ = '\0';
+            char *mtime_s  = tok;
+            tok = strchr(mtime_s, '|'); if (!tok) continue; *tok++ = '\0';
+            char *mtime_ns_s = tok;
+
+            lr_dir *dir = calloc(1, sizeof(lr_dir));
+            if (!dir) { fclose(f); return -1; }
+
+            snprintf(dir->vpath, PATH_MAX, "%s", vpath);
+            dir->mode       = (mode_t)strtoul(mode_s,    NULL, 8);
+            dir->uid        = (uid_t) strtoul(uid_s,     NULL, 10);
+            dir->gid        = (gid_t) strtoul(gid_s,     NULL, 10);
+            dir->mtime_sec  = (time_t)strtoll(mtime_s,   NULL, 10);
+            dir->mtime_nsec = strtol(mtime_ns_s,         NULL, 10);
+            if (!dir->mode)
+                dir->mode = S_IFDIR | 0755;
+
+            state_insert_dir(s, dir);
+            continue;
+        }
+
         /* File records: file|DRIVE|VPATH|SIZE|POS_START|BLOCKS|MTIME_SEC|MTIME_NSEC */
         if (strncmp(p, "file|", 5) != 0)
             continue;
@@ -264,6 +299,19 @@ static int write_to_path(lr_state *s, const char *path)
                 (unsigned)file->mode,
                 (unsigned)file->uid,
                 (unsigned)file->gid);
+        node = node->next;
+    }
+
+    node = lr_list_head(&s->dir_list);
+    while (node) {
+        lr_dir *dir = (lr_dir *)node->data;
+        fprintf(mf, "dir|%s|%o|%u|%u|%lld|%ld\n",
+                dir->vpath,
+                (unsigned)dir->mode,
+                (unsigned)dir->uid,
+                (unsigned)dir->gid,
+                (long long)dir->mtime_sec,
+                dir->mtime_nsec);
         node = node->next;
     }
 

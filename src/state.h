@@ -52,6 +52,21 @@ typedef struct lr_file {
 } lr_file;
 
 /*--------------------------------------------------------------------
+ * Per-directory record (explicitly mkdir'd or had metadata changed)
+ *------------------------------------------------------------------*/
+typedef struct lr_dir {
+    char     vpath[PATH_MAX];
+    mode_t   mode;              /* full st_mode including S_IFDIR */
+    uid_t    uid;
+    gid_t    gid;
+    time_t   mtime_sec;
+    long     mtime_nsec;
+
+    lr_hash_node  vpath_node;   /* embedded node for dir_table */
+    lr_list_node  list_node;    /* embedded node for dir_list */
+} lr_dir;
+
+/*--------------------------------------------------------------------
  * Position-index entry (for parity worker lookup)
  *------------------------------------------------------------------*/
 typedef struct {
@@ -70,6 +85,9 @@ typedef struct lr_state {
 
     lr_hash           file_table;   /* vpath → lr_file* */
     lr_list           file_list;    /* all lr_file* for iteration */
+
+    lr_hash           dir_table;    /* vpath → lr_dir* (explicit dirs) */
+    lr_list           dir_list;     /* all lr_dir* for iteration/save */
 
     lr_pos_allocator  pos_alloc;
 
@@ -109,6 +127,14 @@ lr_file *state_remove_file(lr_state *s, const char *vpath);
 
 /* Lookup by vpath. Returns NULL if not found. */
 lr_file *state_find_file(lr_state *s, const char *vpath);
+
+/*--------------------------------------------------------------------
+ * Directory table operations (caller must hold appropriate lock)
+ *------------------------------------------------------------------*/
+
+void     state_insert_dir(lr_state *s, lr_dir *d);
+lr_dir  *state_find_dir(lr_state *s, const char *vpath);
+lr_dir  *state_remove_dir(lr_state *s, const char *vpath);
 
 /*--------------------------------------------------------------------
  * Drive selection for new files

@@ -83,6 +83,43 @@ static int is_any_dir(lr_state *s, const char *vpath)
 }
 
 /*--------------------------------------------------------------------
+ * Helper: find or create a dir_table entry for path, seeding metadata
+ * from the first real backing directory when creating a new entry.
+ * Caller must hold state_lock (wrlock).
+ *------------------------------------------------------------------*/
+static lr_dir *dir_get_or_create(lr_state *s, const char *path)
+{
+    lr_dir *d = state_find_dir(s, path);
+    if (d)
+        return d;
+
+    d = calloc(1, sizeof(lr_dir));
+    if (!d)
+        return NULL;
+
+    snprintf(d->vpath, PATH_MAX, "%s", path);
+
+    for (unsigned i = 0; i < s->drive_count; i++) {
+        char real[PATH_MAX];
+        real_path_on_drive(s, i, path, real, sizeof(real));
+        struct stat st;
+        if (lstat(real, &st) == 0 && S_ISDIR(st.st_mode)) {
+            d->mode       = st.st_mode;
+            d->uid        = st.st_uid;
+            d->gid        = st.st_gid;
+            d->mtime_sec  = st.st_mtim.tv_sec;
+            d->mtime_nsec = st.st_mtim.tv_nsec;
+            break;
+        }
+    }
+    if (!d->mode)
+        d->mode = S_IFDIR | 0755;
+
+    state_insert_dir(s, d);
+    return d;
+}
+
+/*--------------------------------------------------------------------
  * Helper: create parent directories for real_file_path on drive_idx,
  * inheriting modes from the corresponding directory on another drive
  * when available, falling back to 0755.
@@ -206,8 +243,19 @@ static int lr_getattr(const char *path, struct stat *st,
         return 0;
     }
 
-    /* Directory? Use first drive that has the real directory. */
+    /* Directory? Check dir_table first (authoritative), then real dirs. */
     if (is_any_dir(s, path)) {
+        lr_dir *d = state_find_dir(s, path);
+        if (d) {
+            st->st_mode        = S_IFDIR | (d->mode & 07777);
+            st->st_nlink       = 2;
+            st->st_uid         = d->uid;
+            st->st_gid         = d->gid;
+            st->st_mtim.tv_sec  = d->mtime_sec;
+            st->st_mtim.tv_nsec = d->mtime_nsec;
+            pthread_rwlock_unlock(&s->state_lock);
+            return 0;
+        }
         for (unsigned i = 0; i < s->drive_count; i++) {
             char real[PATH_MAX];
             real_path_on_drive(s, i, path, real, sizeof(real));
@@ -219,7 +267,7 @@ static int lr_getattr(const char *path, struct stat *st,
                 return 0;
             }
         }
-        /* Virtual dir with no backing real directory yet */
+        /* Virtual dir with no backing real directory */
         pthread_rwlock_unlock(&s->state_lock);
         st->st_mode  = S_IFDIR | 0755;
         st->st_nlink = 2;
@@ -360,10 +408,29 @@ static int lr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                         (!have_stat || !S_ISDIR(st.st_mode)))
                         continue;
                 }
-                if (!SEEN_ADD(de->d_name))
+                if (!SEEN_ADD(de->d_name)) {
+                    /* For PLUS, prefer dir_table metadata if available */
+                    if (use_plus && have_stat) {
+                        char subvpath[PATH_MAX];
+                        snprintf(subvpath, sizeof(subvpath), "%s/%s",
+                                 strcmp(path, "/") == 0 ? "" : path,
+                                 de->d_name);
+                        pthread_rwlock_rdlock(&s->state_lock);
+                        lr_dir *dd = state_find_dir(s, subvpath);
+                        if (dd) {
+                            st.st_mode        = S_IFDIR | (dd->mode & 07777);
+                            st.st_uid         = dd->uid;
+                            st.st_gid         = dd->gid;
+                            st.st_mtim.tv_sec  = dd->mtime_sec;
+                            st.st_mtim.tv_nsec = dd->mtime_nsec;
+                            st.st_nlink       = 2;
+                        }
+                        pthread_rwlock_unlock(&s->state_lock);
+                    }
                     filler(buf, de->d_name,
                            (use_plus && have_stat) ? &st : NULL, 0,
                            (use_plus && have_stat) ? FUSE_FILL_DIR_PLUS : 0);
+                }
             }
         }
         closedir(dp);
@@ -677,7 +744,7 @@ static int lr_mkdir(const char *path, mode_t mode)
 {
     lr_state *s = g_state;
 
-    pthread_rwlock_rdlock(&s->state_lock);
+    pthread_rwlock_wrlock(&s->state_lock);
     unsigned drive_idx = state_pick_drive(s);
     char real[PATH_MAX];
     real_path_on_drive(s, drive_idx, path, real, sizeof(real));
@@ -685,6 +752,26 @@ static int lr_mkdir(const char *path, mode_t mode)
 
     if (mkdir(real, mode) != 0)
         return -errno;
+
+    /* Record directory metadata in dir_table */
+    lr_dir *d = calloc(1, sizeof(lr_dir));
+    if (d) {
+        snprintf(d->vpath, PATH_MAX, "%s", path);
+        struct stat st;
+        if (lstat(real, &st) == 0) {
+            d->mode       = st.st_mode;
+            d->uid        = st.st_uid;
+            d->gid        = st.st_gid;
+            d->mtime_sec  = st.st_mtim.tv_sec;
+            d->mtime_nsec = st.st_mtim.tv_nsec;
+        } else {
+            d->mode = S_IFDIR | (mode & 07777);
+        }
+        pthread_rwlock_wrlock(&s->state_lock);
+        state_insert_dir(s, d);
+        pthread_rwlock_unlock(&s->state_lock);
+    }
+
     return 0;
 }
 
@@ -692,9 +779,12 @@ static int lr_rmdir(const char *path)
 {
     lr_state *s = g_state;
 
-    pthread_rwlock_rdlock(&s->state_lock);
+    pthread_rwlock_wrlock(&s->state_lock);
+    lr_dir *d = state_remove_dir(s, path);
     unsigned count = s->drive_count;
     pthread_rwlock_unlock(&s->state_lock);
+
+    free(d);
 
     for (unsigned i = 0; i < count; i++) {
         pthread_rwlock_rdlock(&s->state_lock);
@@ -838,8 +928,9 @@ static int lr_utimens(const char *path, const struct timespec ts[2],
         return rc ? -errno : 0;
     }
 
-    /* Directory: apply to every drive that has it */
+    /* Directory: apply to every drive that has it, update dir_table */
     if (is_any_dir(s, path)) {
+        lr_dir *d = dir_get_or_create(s, path);
         unsigned count = s->drive_count;
         int ret = -ENOENT;
         for (unsigned i = 0; i < count; i++) {
@@ -847,11 +938,24 @@ static int lr_utimens(const char *path, const struct timespec ts[2],
             real_path_on_drive(s, i, path, real, sizeof(real));
             struct stat st;
             if (lstat(real, &st) == 0 && S_ISDIR(st.st_mode)) {
-                if (utimensat(AT_FDCWD, real, ts, 0) == 0)
+                if (utimensat(AT_FDCWD, real, ts, 0) == 0) {
                     ret = 0;
-                else if (ret == -ENOENT)
+                    if (d && lstat(real, &st) == 0) {
+                        d->mtime_sec  = st.st_mtim.tv_sec;
+                        d->mtime_nsec = st.st_mtim.tv_nsec;
+                    }
+                } else if (ret == -ENOENT) {
                     ret = -errno;
+                }
             }
+        }
+        /* Virtual-only dir: store the times even with no real backing */
+        if (ret == -ENOENT && is_virtual_dir(s, path)) {
+            if (d) {
+                d->mtime_sec  = ts[1].tv_sec;
+                d->mtime_nsec = ts[1].tv_nsec;
+            }
+            ret = 0;
         }
         pthread_rwlock_unlock(&s->state_lock);
         return ret;
@@ -883,8 +987,9 @@ static int lr_chmod(const char *path, mode_t mode,
         return rc ? -errno : 0;
     }
 
-    /* Directory: apply to every drive that has it */
+    /* Directory: apply to every drive that has it, update dir_table */
     if (is_any_dir(s, path)) {
+        lr_dir *d = dir_get_or_create(s, path);
         unsigned count = s->drive_count;
         int ret = -ENOENT;
         for (unsigned i = 0; i < count; i++) {
@@ -898,6 +1003,10 @@ static int lr_chmod(const char *path, mode_t mode,
                     ret = -errno;
             }
         }
+        if (d)
+            d->mode = (d->mode & ~(mode_t)07777) | (mode & 07777);
+        if (ret == -ENOENT && is_virtual_dir(s, path))
+            ret = 0;
         pthread_rwlock_unlock(&s->state_lock);
         return ret;
     }
@@ -930,8 +1039,9 @@ static int lr_chown(const char *path, uid_t uid, gid_t gid,
         return rc ? -errno : 0;
     }
 
-    /* Directory: apply to every drive that has it */
+    /* Directory: apply to every drive that has it, update dir_table */
     if (is_any_dir(s, path)) {
+        lr_dir *d = dir_get_or_create(s, path);
         unsigned count = s->drive_count;
         int ret = -ENOENT;
         for (unsigned i = 0; i < count; i++) {
@@ -945,6 +1055,12 @@ static int lr_chown(const char *path, uid_t uid, gid_t gid,
                     ret = -errno;
             }
         }
+        if (d) {
+            if (uid != (uid_t)-1) d->uid = uid;
+            if (gid != (gid_t)-1) d->gid = gid;
+        }
+        if (ret == -ENOENT && is_virtual_dir(s, path))
+            ret = 0;
         pthread_rwlock_unlock(&s->state_lock);
         return ret;
     }

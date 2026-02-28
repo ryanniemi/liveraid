@@ -33,6 +33,9 @@ int state_init(lr_state *s, const lr_config *cfg)
     lr_hash_init(&s->file_table);
     lr_list_init(&s->file_list);
 
+    lr_hash_init(&s->dir_table);
+    lr_list_init(&s->dir_list);
+
     alloc_init(&s->pos_alloc);
 
     if (pthread_rwlock_init(&s->state_lock, NULL) != 0) {
@@ -47,7 +50,7 @@ void state_done(lr_state *s)
 {
     unsigned i;
 
-    /* Free all file records (nodes are embedded; no separate free needed) */
+    /* Free all file records */
     lr_list_node *node = lr_list_head(&s->file_list);
     while (node) {
         lr_list_node *next = node->next;
@@ -55,6 +58,15 @@ void state_done(lr_state *s)
         node = next;
     }
     lr_hash_done(&s->file_table);
+
+    /* Free all dir records */
+    node = lr_list_head(&s->dir_list);
+    while (node) {
+        lr_list_node *next = node->next;
+        free(node->data);
+        node = next;
+    }
+    lr_hash_done(&s->dir_table);
 
     alloc_done(&s->pos_alloc);
 
@@ -95,6 +107,40 @@ lr_file *state_remove_file(lr_state *s, const char *vpath)
     lr_hash_remove(&s->file_table, &f->vpath_node);
     lr_list_remove(&s->file_list, &f->list_node);
     return f;
+}
+
+/* ------------------------------------------------------------------ */
+/* Directory table                                                      */
+/* ------------------------------------------------------------------ */
+
+static int dir_find_compare(const void *arg, const void *obj)
+{
+    const char   *vpath = (const char *)arg;
+    const lr_dir *d     = (const lr_dir *)obj;
+    return strcmp(vpath, d->vpath) != 0; /* 0 = match */
+}
+
+void state_insert_dir(lr_state *s, lr_dir *d)
+{
+    uint32_t h = lr_hash_string(d->vpath);
+    lr_hash_insert(&s->dir_table, &d->vpath_node, d, h);
+    lr_list_insert_tail(&s->dir_list, &d->list_node, d);
+}
+
+lr_dir *state_find_dir(lr_state *s, const char *vpath)
+{
+    uint32_t h = lr_hash_string(vpath);
+    return (lr_dir *)lr_hash_search(&s->dir_table, h, dir_find_compare, vpath);
+}
+
+lr_dir *state_remove_dir(lr_state *s, const char *vpath)
+{
+    lr_dir *d = state_find_dir(s, vpath);
+    if (!d)
+        return NULL;
+    lr_hash_remove(&s->dir_table, &d->vpath_node);
+    lr_list_remove(&s->dir_list, &d->list_node);
+    return d;
 }
 
 unsigned state_pick_drive(lr_state *s)
