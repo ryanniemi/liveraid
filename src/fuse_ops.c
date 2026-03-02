@@ -245,6 +245,20 @@ static int lr_getattr(const char *path, struct stat *st,
         return 0;
     }
 
+    /* Symlink? */
+    lr_symlink *sl = state_find_symlink(s, path);
+    if (sl) {
+        st->st_mode         = S_IFLNK | 0777;
+        st->st_nlink        = 1;
+        st->st_size         = (off_t)strlen(sl->target);
+        st->st_uid          = sl->uid;
+        st->st_gid          = sl->gid;
+        st->st_mtim.tv_sec  = sl->mtime_sec;
+        st->st_mtim.tv_nsec = sl->mtime_nsec;
+        pthread_rwlock_unlock(&s->state_lock);
+        return 0;
+    }
+
     /* Directory? Check dir_table first (authoritative), then real dirs. */
     if (is_any_dir(s, path)) {
         lr_dir *d = state_find_dir(s, path);
@@ -380,6 +394,50 @@ static int lr_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
             filler(buf, name, stp, 0, fill_flags);
         }
         node = node->next;
+    }
+
+    /* Add symlinks in this directory */
+    node = lr_list_head(&s->symlink_list);
+    while (node) {
+        lr_symlink *sl_entry = (lr_symlink *)node->data;
+        const char *fp = sl_entry->vpath;
+        node = node->next;
+
+        if (strncmp(fp, path, path_len) != 0)
+            continue;
+        const char *rest = fp + path_len;
+        if (path_len > 1 && rest[0] != '/')
+            continue;
+        if (path_len == 1 && rest[0] == '/')
+            rest++;
+        else if (path_len > 1 && rest[0] == '/')
+            rest++;
+
+        if (rest[0] == '\0')
+            continue;
+
+        /* Only direct children: no further slash */
+        if (strchr(rest, '/') != NULL)
+            continue;
+
+        if (!SEEN_ADD(rest)) {
+            struct stat st;
+            struct stat *stp = NULL;
+            enum fuse_fill_dir_flags fill_flags = 0;
+            if (use_plus) {
+                memset(&st, 0, sizeof(st));
+                st.st_mode         = S_IFLNK | 0777;
+                st.st_nlink        = 1;
+                st.st_size         = (off_t)strlen(sl_entry->target);
+                st.st_uid          = sl_entry->uid;
+                st.st_gid          = sl_entry->gid;
+                st.st_mtim.tv_sec  = sl_entry->mtime_sec;
+                st.st_mtim.tv_nsec = sl_entry->mtime_nsec;
+                stp        = &st;
+                fill_flags = FUSE_FILL_DIR_PLUS;
+            }
+            filler(buf, rest, stp, 0, fill_flags);
+        }
     }
 
     /* Also scan real drive directories for subdirs not in file_table
@@ -724,6 +782,60 @@ static int lr_create(const char *path, mode_t mode,
 }
 
 /*--------------------------------------------------------------------
+ * symlink / readlink
+ *------------------------------------------------------------------*/
+static int lr_do_symlink(const char *target, const char *link_path)
+{
+    lr_state *s = g_state;
+
+    if (strlen(target) >= PATH_MAX)
+        return -ENAMETOOLONG;
+
+    pthread_rwlock_wrlock(&s->state_lock);
+
+    if (state_find_file(s, link_path) || state_find_dir(s, link_path) ||
+        state_find_symlink(s, link_path)) {
+        pthread_rwlock_unlock(&s->state_lock);
+        return -EEXIST;
+    }
+
+    lr_symlink *sl = calloc(1, sizeof(lr_symlink));
+    if (!sl) {
+        pthread_rwlock_unlock(&s->state_lock);
+        return -ENOMEM;
+    }
+    snprintf(sl->vpath,  PATH_MAX, "%s", link_path);
+    snprintf(sl->target, PATH_MAX, "%s", target);
+    sl->mtime_sec = time(NULL);
+    sl->uid       = (uid_t)fuse_get_context()->uid;
+    sl->gid       = (gid_t)fuse_get_context()->gid;
+
+    state_insert_symlink(s, sl);
+    pthread_rwlock_unlock(&s->state_lock);
+    return 0;
+}
+
+static int lr_readlink(const char *path, char *buf, size_t size)
+{
+    lr_state *s = g_state;
+
+    pthread_rwlock_rdlock(&s->state_lock);
+    lr_symlink *sl = state_find_symlink(s, path);
+    if (!sl) {
+        pthread_rwlock_unlock(&s->state_lock);
+        return -ENOENT;
+    }
+    /* readlink must null-terminate; truncate to size-1 if necessary */
+    size_t len = strlen(sl->target);
+    if (len >= size)
+        len = size - 1;
+    memcpy(buf, sl->target, len);
+    buf[len] = '\0';
+    pthread_rwlock_unlock(&s->state_lock);
+    return 0;
+}
+
+/*--------------------------------------------------------------------
  * unlink
  *------------------------------------------------------------------*/
 static int lr_unlink(const char *path)
@@ -734,6 +846,12 @@ static int lr_unlink(const char *path)
 
     lr_file *f = state_remove_file(s, path);
     if (!f) {
+        lr_symlink *sl = state_remove_symlink(s, path);
+        if (sl) {
+            pthread_rwlock_unlock(&s->state_lock);
+            free(sl);
+            return 0;
+        }
         pthread_rwlock_unlock(&s->state_lock);
         return -ENOENT;
     }
@@ -785,8 +903,27 @@ static int lr_rename(const char *from, const char *to, unsigned int flags)
     if (!f) {
         /* Not a file — check if it's a directory */
         if (!is_any_dir(s, from)) {
+            /* Check if it's a symlink */
+            lr_symlink *sl = state_find_symlink(s, from);
+            if (!sl) {
+                pthread_rwlock_unlock(&s->state_lock);
+                return -ENOENT;
+            }
+            if ((flags & RENAME_NOREPLACE) &&
+                (state_find_file(s, to) || state_find_symlink(s, to))) {
+                pthread_rwlock_unlock(&s->state_lock);
+                return -EEXIST;
+            }
+            /* Remove overwritten destination symlink if present */
+            lr_symlink *old_dest = state_remove_symlink(s, to);
+            /* Re-key the symlink under the new path */
+            lr_hash_remove(&s->symlink_table, &sl->vpath_node);
+            snprintf(sl->vpath, PATH_MAX, "%s", to);
+            uint32_t h = lr_hash_string(sl->vpath);
+            lr_hash_insert(&s->symlink_table, &sl->vpath_node, sl, h);
             pthread_rwlock_unlock(&s->state_lock);
-            return -ENOENT;
+            free(old_dest);
+            return 0;
         }
 
         /* RENAME_NOREPLACE: fail if destination already exists */
@@ -1149,6 +1286,17 @@ static int lr_utimens(const char *path, const struct timespec ts[2],
         return rc ? -errno : 0;
     }
 
+    /* Symlink: update mtime in-memory */
+    {
+        lr_symlink *sl = state_find_symlink(s, path);
+        if (sl) {
+            sl->mtime_sec  = ts[1].tv_sec;
+            sl->mtime_nsec = ts[1].tv_nsec;
+            pthread_rwlock_unlock(&s->state_lock);
+            return 0;
+        }
+    }
+
     /* Directory: apply to every drive that has it, update dir_table */
     if (is_any_dir(s, path)) {
         lr_dir *d = dir_get_or_create(s, path);
@@ -1208,6 +1356,12 @@ static int lr_chmod(const char *path, mode_t mode,
         return rc ? -errno : 0;
     }
 
+    /* Symlink: chmod has no meaning; accept silently */
+    if (state_find_symlink(s, path)) {
+        pthread_rwlock_unlock(&s->state_lock);
+        return 0;
+    }
+
     /* Directory: apply to every drive that has it, update dir_table */
     if (is_any_dir(s, path)) {
         lr_dir *d = dir_get_or_create(s, path);
@@ -1258,6 +1412,17 @@ static int lr_chown(const char *path, uid_t uid, gid_t gid,
         }
         pthread_rwlock_unlock(&s->state_lock);
         return rc ? -errno : 0;
+    }
+
+    /* Symlink: update uid/gid in-memory */
+    {
+        lr_symlink *sl = state_find_symlink(s, path);
+        if (sl) {
+            if (uid != (uid_t)-1) sl->uid = uid;
+            if (gid != (gid_t)-1) sl->gid = gid;
+            pthread_rwlock_unlock(&s->state_lock);
+            return 0;
+        }
     }
 
     /* Directory: apply to every drive that has it, update dir_table */
@@ -1467,6 +1632,8 @@ const struct fuse_operations lr_fuse_ops = {
     .create   = lr_create,
     .unlink   = lr_unlink,
     .rename   = lr_rename,
+    .symlink  = lr_do_symlink,
+    .readlink = lr_readlink,
     .mkdir    = lr_mkdir,
     .rmdir    = lr_rmdir,
     .truncate = lr_truncate,

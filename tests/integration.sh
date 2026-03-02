@@ -24,9 +24,10 @@
 #  12. Position reuse: parity position freed by unlink is reused by next alloc
 #  13. chown: uid/gid on files and dirs, immediate + remount persistence
 #  14. Placement policies: mostfree, lfs, pfrd smoke test (8 files + parity clean)
+#  15. Symlinks: create, readlink, getattr S_IFLNK, readdir, persistence, unlink
 #
 # Tests 1-9 use 4 drives + 2 parity levels + parity_threads=4.
-# Tests 10-14 use various configs as noted inline.
+# Tests 10-15 use various configs as noted inline.
 # Drives and parity are created under /tmp/lrt/ and cleaned up after each test.
 
 set -euo pipefail
@@ -528,6 +529,77 @@ got_gid=$(stat -c '%g' $MNT/chown_dir)
 [ "$got_uid" = "$myuid" ] && [ "$got_gid" = "$alt_gid" ] \
     && pass "chown dir: uid/gid persists after remount" \
     || fail "chown dir remount" "uid=$got_uid gid=$got_gid (expected $myuid:$alt_gid)"
+
+unmount_fs
+
+# ===================================================================
+echo ""
+echo "=== Symlinks ==="
+wipe_data
+# Use a simple single-drive, no-parity config
+cat > /tmp/lrt/symlink_test.conf << CONFEOF
+data d1 /tmp/lrt/d1
+content /tmp/lrt/content/liveraid.content
+mountpoint /tmp/lrt/mount
+blocksize 64
+placement roundrobin
+parity_threads 1
+CONFEOF
+
+$BIN -c /tmp/lrt/symlink_test.conf -f $MNT >>/tmp/lrt/liveraid.log 2>&1 &
+sleep 1.5
+if ! grep -q lrt /proc/mounts; then
+    echo "ERROR: mount failed"; tail -5 /tmp/lrt/liveraid.log; exit 1
+fi
+
+# Create a regular file for the symlink to target
+echo "symlink_target_content" > $MNT/target.txt
+
+# Create a symlink pointing to a file
+ln -s /target.txt $MNT/link_to_file.txt
+
+# Create a directory and a symlink pointing to a directory
+mkdir -p $MNT/real_dir
+ln -s /real_dir $MNT/link_to_dir
+
+# readlink returns the correct target
+val=$(readlink $MNT/link_to_file.txt)
+[ "$val" = "/target.txt" ] && pass "symlink: readlink file target" \
+                            || fail "symlink: readlink file target" "got '$val'"
+
+val=$(readlink $MNT/link_to_dir)
+[ "$val" = "/real_dir" ] && pass "symlink: readlink dir target" \
+                          || fail "symlink: readlink dir target" "got '$val'"
+
+# getattr reports S_IFLNK (file type nibble = 0xa)
+mode=$(stat -c '%f' $MNT/link_to_file.txt)
+[ "$((16#$mode & 16#f000))" = "$((16#a000))" ] \
+    && pass "symlink: getattr S_IFLNK" \
+    || fail "symlink: getattr S_IFLNK" "mode=$mode"
+
+# readdir lists the symlink
+ls $MNT | grep -q "link_to_file.txt" \
+    && pass "symlink: readdir lists symlink" \
+    || fail "symlink: readdir lists symlink"
+
+# Remount and verify persistence
+fusermount3 -u $MNT; sleep 0.3
+$BIN -c /tmp/lrt/symlink_test.conf -f $MNT >>/tmp/lrt/liveraid.log 2>&1 &
+sleep 1.5
+if ! grep -q lrt /proc/mounts; then
+    echo "ERROR: remount failed"; tail -5 /tmp/lrt/liveraid.log; exit 1
+fi
+
+val=$(readlink $MNT/link_to_file.txt)
+[ "$val" = "/target.txt" ] && pass "symlink: readlink persists after remount" \
+                            || fail "symlink: readlink persists after remount" "got '$val'"
+
+# unlink removes the symlink but leaves the target intact
+rm $MNT/link_to_file.txt
+[ ! -L $MNT/link_to_file.txt ] && pass "symlink: unlink removes symlink" \
+                                 || fail "symlink: unlink removes symlink"
+[ -f $MNT/target.txt ] && pass "symlink: target intact after unlink" \
+                         || fail "symlink: target intact after unlink"
 
 unmount_fs
 

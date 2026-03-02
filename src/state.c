@@ -41,6 +41,9 @@ int state_init(lr_state *s, const lr_config *cfg)
     lr_hash_init(&s->dir_table);
     lr_list_init(&s->dir_list);
 
+    lr_hash_init(&s->symlink_table);
+    lr_list_init(&s->symlink_list);
+
     if (pthread_rwlock_init(&s->state_lock, NULL) != 0) {
         fprintf(stderr, "state_init: rwlock_init failed\n");
         return -1;
@@ -70,6 +73,15 @@ void state_done(lr_state *s)
         node = next;
     }
     lr_hash_done(&s->dir_table);
+
+    /* Free all symlink records */
+    node = lr_list_head(&s->symlink_list);
+    while (node) {
+        lr_list_node *next = node->next;
+        free(node->data);
+        node = next;
+    }
+    lr_hash_done(&s->symlink_table);
 
     for (i = 0; i < s->drive_count; i++)
         alloc_done(&s->drives[i].pos_alloc);
@@ -145,6 +157,41 @@ lr_dir *state_remove_dir(lr_state *s, const char *vpath)
     lr_hash_remove(&s->dir_table, &d->vpath_node);
     lr_list_remove(&s->dir_list, &d->list_node);
     return d;
+}
+
+/* ------------------------------------------------------------------ */
+/* Symlink table                                                        */
+/* ------------------------------------------------------------------ */
+
+static int symlink_find_compare(const void *arg, const void *obj)
+{
+    const char       *vpath = (const char *)arg;
+    const lr_symlink *sl    = (const lr_symlink *)obj;
+    return strcmp(vpath, sl->vpath) != 0; /* 0 = match */
+}
+
+void state_insert_symlink(lr_state *s, lr_symlink *sl)
+{
+    uint32_t h = lr_hash_string(sl->vpath);
+    lr_hash_insert(&s->symlink_table, &sl->vpath_node, sl, h);
+    lr_list_insert_tail(&s->symlink_list, &sl->list_node, sl);
+}
+
+lr_symlink *state_find_symlink(lr_state *s, const char *vpath)
+{
+    uint32_t h = lr_hash_string(vpath);
+    return (lr_symlink *)lr_hash_search(&s->symlink_table, h,
+                                        symlink_find_compare, vpath);
+}
+
+lr_symlink *state_remove_symlink(lr_state *s, const char *vpath)
+{
+    lr_symlink *sl = state_find_symlink(s, vpath);
+    if (!sl)
+        return NULL;
+    lr_hash_remove(&s->symlink_table, &sl->vpath_node);
+    lr_list_remove(&s->symlink_list, &sl->list_node);
+    return sl;
 }
 
 unsigned state_pick_drive(lr_state *s)

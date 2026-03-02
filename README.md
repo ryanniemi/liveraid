@@ -65,6 +65,7 @@ storage where total array loss is a worse outcome than partial file loss.
 - **Persistent metadata**: content file saved atomically on unmount and periodically (default every 5 min, configurable)
 - **CRC32 integrity**: content file footer detects corruption at load time
 - **Drive selection**: `mostfree` (default), `lfs`, `pfrd`, or `roundrobin`
+- **Symlink support**: create and read symlinks; metadata-only (no parity)
 
 ## Requirements
 
@@ -84,7 +85,7 @@ make
 The binary `liveraid` is placed in the current directory.
 
 ```sh
-make test                  # build and run the unit test suite (62 tests, no extra deps)
+make test                  # build and run the unit test suite (63 tests, no extra deps)
 bash tests/integration.sh  # live FUSE integration tests (requires fusermount3, ~500 MiB /tmp)
 make clean                 # remove objects, binary, and test binaries
 ```

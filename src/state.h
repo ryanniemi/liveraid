@@ -67,6 +67,21 @@ typedef struct lr_dir {
 } lr_dir;
 
 /*--------------------------------------------------------------------
+ * Per-symlink record (metadata-only; no drive storage, no parity)
+ *------------------------------------------------------------------*/
+typedef struct lr_symlink {
+    char     vpath[PATH_MAX];
+    char     target[PATH_MAX];
+    time_t   mtime_sec;
+    long     mtime_nsec;
+    uid_t    uid;
+    gid_t    gid;
+
+    lr_hash_node  vpath_node;   /* embedded node for symlink_table */
+    lr_list_node  list_node;    /* embedded node for symlink_list */
+} lr_symlink;
+
+/*--------------------------------------------------------------------
  * Position-index entry (for parity worker lookup)
  *------------------------------------------------------------------*/
 typedef struct {
@@ -88,6 +103,9 @@ typedef struct lr_state {
 
     lr_hash           dir_table;    /* vpath → lr_dir* (explicit dirs) */
     lr_list           dir_list;     /* all lr_dir* for iteration/save */
+
+    lr_hash           symlink_table; /* vpath → lr_symlink* */
+    lr_list           symlink_list;  /* all lr_symlink* for iteration/save */
 
     struct lr_parity_handle *parity;
     struct lr_journal        *journal;
@@ -137,6 +155,14 @@ lr_file *state_find_file(lr_state *s, const char *vpath);
 void     state_insert_dir(lr_state *s, lr_dir *d);
 lr_dir  *state_find_dir(lr_state *s, const char *vpath);
 lr_dir  *state_remove_dir(lr_state *s, const char *vpath);
+
+/*--------------------------------------------------------------------
+ * Symlink table operations (caller must hold appropriate lock)
+ *------------------------------------------------------------------*/
+
+void        state_insert_symlink(lr_state *s, lr_symlink *sl);
+lr_symlink *state_find_symlink(lr_state *s, const char *vpath);
+lr_symlink *state_remove_symlink(lr_state *s, const char *vpath);
 
 /*--------------------------------------------------------------------
  * Drive selection for new files

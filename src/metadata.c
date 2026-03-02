@@ -171,6 +171,44 @@ int metadata_load(lr_state *s)
             continue;
         }
 
+        /* Symlink records: symlink|VPATH|TARGET|MTIME_SEC|MTIME_NSEC|UID|GID */
+        if (strncmp(p, "symlink|", 8) == 0) {
+            char buf[PATH_MAX * 2 + 256];
+            strncpy(buf, p + 8, sizeof(buf) - 1);
+            buf[sizeof(buf)-1] = '\0';
+
+            char *tok;
+            char *vpath      = buf;
+            tok = strchr(vpath, '|'); if (!tok) continue; *tok++ = '\0';
+            char *target     = tok;
+            tok = strchr(target, '|'); if (!tok) continue; *tok++ = '\0';
+            char *mtime_s    = tok;
+            tok = strchr(mtime_s, '|'); if (!tok) continue; *tok++ = '\0';
+            char *mtime_ns_s = tok;
+            tok = strchr(mtime_ns_s, '|'); if (!tok) continue; *tok++ = '\0';
+            char *uid_s      = tok;
+            tok = strchr(uid_s, '|'); if (!tok) continue; *tok++ = '\0';
+            char *gid_s      = tok;
+
+            if (strlen(vpath) >= PATH_MAX || strlen(target) >= PATH_MAX) {
+                fprintf(stderr,
+                        "metadata: symlink vpath/target too long at line %d, skipping\n",
+                        lineno);
+                continue;
+            }
+
+            lr_symlink *sl = calloc(1, sizeof(lr_symlink));
+            if (!sl) { fclose(f); return -1; }
+            snprintf(sl->vpath,  PATH_MAX, "%s", vpath);
+            snprintf(sl->target, PATH_MAX, "%s", target);
+            sl->mtime_sec  = (time_t)strtoll(mtime_s,    NULL, 10);
+            sl->mtime_nsec = strtol(mtime_ns_s,           NULL, 10);
+            sl->uid        = (uid_t)strtoul(uid_s,        NULL, 10);
+            sl->gid        = (gid_t)strtoul(gid_s,        NULL, 10);
+            state_insert_symlink(s, sl);
+            continue;
+        }
+
         /* File records: file|DRIVE|VPATH|SIZE|POS_START|BLOCKS|MTIME_SEC|MTIME_NSEC */
         if (strncmp(p, "file|", 5) != 0)
             continue;
@@ -361,6 +399,16 @@ static int write_to_path(lr_state *s, const char *path)
                 (unsigned)dir->gid,
                 (long long)dir->mtime_sec,
                 dir->mtime_nsec);
+        node = node->next;
+    }
+
+    node = lr_list_head(&s->symlink_list);
+    while (node) {
+        lr_symlink *sl = (lr_symlink *)node->data;
+        fprintf(mf, "symlink|%s|%s|%lld|%ld|%u|%u\n",
+                sl->vpath, sl->target,
+                (long long)sl->mtime_sec, sl->mtime_nsec,
+                (unsigned)sl->uid, (unsigned)sl->gid);
         node = node->next;
     }
 

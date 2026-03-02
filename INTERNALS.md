@@ -10,7 +10,9 @@ configuration, and operational procedures, see [README.md](README.md).
 The virtual filesystem merges all data drives. Files are looked up by their
 virtual path (e.g. `/movies/foo.mkv`) in an in-memory hash table. Directories
 are synthesized: a virtual directory exists for any path prefix that appears in
-the file table.
+the file table. Symlinks are metadata-only entries stored in a separate
+in-memory hash table and list; they occupy no real files on any drive and have
+no parity coverage.
 
 ### File placement
 
@@ -225,10 +227,11 @@ file|1|/movies/foo.mkv|734003200|0|2792|1706745600|0|100644|1000|1000
 file|2|/docs/a.pdf|1048576|0|4|1706745601|0|100600|1000|1000
 dir|/movies|40755|1000|1000|1706745600|0
 dir|/docs|40700|1000|1000|1706745601|0
+symlink|/docs/latest|/docs/a.pdf|1706745602|0|1000|1000
 # crc32: A3F1CC02
 ```
 
-Header lines (before `file|` and `dir|` records):
+Header lines (before `file|`, `dir|`, and `symlink|` records):
 
 - `# drive_next_free: NAME N` — high-water mark of the position allocator for
   drive `NAME`; one line per drive.
@@ -241,12 +244,16 @@ File fields: `file|DRIVE|VPATH|SIZE|PARITY_POS_START|BLOCK_COUNT|MTIME_SEC|MTIME
 
 Directory fields: `dir|VPATH|MODE|UID|GID|MTIME_SEC|MTIME_NSEC`
 
+Symlink fields: `symlink|VPATH|TARGET|MTIME_SEC|MTIME_NSEC|UID|GID`
+
 - `MODE` is the full `st_mode` value in octal (e.g. `100644` = regular file, `40755` = directory).
 - `UID` / `GID` are decimal owner and group IDs.
 - Directory records are written for directories that have been explicitly created
   (`mkdir`) or had a metadata operation applied (`chmod`, `chown`, `utimens`).
   Ancestor directories that exist implicitly because files were placed in them
   are not recorded and report mode `0755`, uid/gid `0`, and epoch mtime.
+- Symlink records carry no drive or parity fields; `getattr` always reports
+  `S_IFLNK | 0777` with `st_size` equal to `strlen(target)`.
 - Content files from older versions that omit the last three `file` fields
   default to mode `100644`, uid `0`, gid `0` on load — backward compatible.
 - Old-format `# next_free_pos:` / `# free_extent:` global headers are silently
@@ -289,10 +296,12 @@ liveraid/
     ├── config.h/c      # INI-style config parser
     ├── state.h/c       # In-memory state, file table (lr_hash),
     │                   # file list (lr_list), dir table/list,
-    │                   # drive selection, per-drive position index
+    │                   # symlink table/list, drive selection,
+    │                   # per-drive position index
     │                   # lr_file: vpath, real_path, size, parity positions,
     │                   # mtime, mode, uid, gid
     │                   # lr_dir: vpath, mode, uid, gid, mtime
+    │                   # lr_symlink: vpath, target, mtime, uid, gid
     ├── lr_hash.h/c     # Intrusive separate-chaining hash map (FNV-1a)
     ├── lr_list.h/c     # Intrusive doubly-linked list
     ├── alloc.h/c       # Per-drive parity-position allocator (sorted free extents + high-water mark)
@@ -300,6 +309,7 @@ liveraid/
     │                   # 11-field format with mode/uid/gid; backward-compat load
     ├── fuse_ops.h/c    # FUSE3 high-level operation callbacks
     │                   # lr_fh_t per-open struct (fd + vpath) in fi->fh
+    │                   # lr_do_symlink / lr_readlink: symlink support
     ├── parity.h/c      # Parity file I/O, ISA-L encode/recover wrappers,
     │                   # lr_alloc_vector, parity_update_position,
     │                   # parity_recover_block (multi-drive), parity_scrub

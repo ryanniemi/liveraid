@@ -54,7 +54,7 @@ exercises end-to-end behaviour. Prerequisites: `fusermount3` (`apt install fuse3
 bash tests/integration.sh   # run from repo root
 ```
 
-The script creates 4 data drives + 2 parity levels, runs 14 test sections, and
+The script creates 4 data drives + 2 parity levels, runs 15 test sections, and
 prints a `PASS`/`FAIL` summary. Each section calls `wipe_data` to start clean.
 
 | # | Section | What is exercised |
@@ -73,6 +73,7 @@ prints a `PASS`/`FAIL` summary. Each section calls `wipe_data` to start clean.
 | 12 | Position reuse | Parity position freed by `unlink` is reused by next allocation |
 | 13 | chown on files and dirs | uid/gid set immediately and persists across remount |
 | 14 | Placement policy smoke | `mostfree`, `lfs`, `pfrd`: 8 files readable + parity clean each |
+| 15 | Symlinks | `ln -s` creates symlink; `readlink` returns target; `getattr` reports `S_IFLNK`; `readdir` lists symlink; persists across remount; `unlink` removes symlink without touching target |
 
 ## Architecture
 
@@ -100,7 +101,7 @@ prints a `PASS`/`FAIL` summary. Each section calls `wipe_data` to start clean.
     ├── lr_list.h/c     # Intrusive doubly-linked list
     ├── alloc.h/c       # Per-drive parity-position allocator + free list
     ├── metadata.h/c    # Content-file load/save (atomic write, CRC32)
-    ├── fuse_ops.h/c    # FUSE3 high-level operation callbacks
+    ├── fuse_ops.h/c    # FUSE3 high-level operation callbacks (incl. lr_do_symlink, lr_readlink)
     ├── parity.h/c      # Parity file I/O, ISA-L encode/recover/scrub/repair wrappers
     ├── journal.h/c     # Dirty-position bitmap + background worker thread
     │                   # (parallel drain, periodic save, crash journal, scrub/repair)
@@ -110,11 +111,13 @@ prints a `PASS`/`FAIL` summary. Each section calls `wipe_data` to start clean.
 
 ### Core Concepts
 
-**State Management**: `src/state.h` + `src/state.c` — `lr_state` owns all filesystem metadata: file table (`lr_hash`), ordered file list (`lr_list`), directory table and list (`lr_dir`), drive array (each `lr_drive` holds its own `lr_pos_allocator`), parity handle, rwlock.
+**State Management**: `src/state.h` + `src/state.c` — `lr_state` owns all filesystem metadata: file table (`lr_hash`), ordered file list (`lr_list`), directory table and list (`lr_dir`), symlink table and list (`lr_symlink`), drive array (each `lr_drive` holds its own `lr_pos_allocator`), parity handle, rwlock.
 
 **File Model**: Each `lr_file` stores vpath, drive index, real path on disk, size, parity position range `[pos_start, pos_start+block_count)`, mtime, mode, uid, gid, and open_count.
 
 **Directory Model**: Each `lr_dir` stores vpath, mode, uid, gid, and mtime. Persisted in the content file. Only directories that have been explicitly created or had a metadata operation applied are tracked; synthetic ancestor directories are not.
+
+**Symlink Model**: Each `lr_symlink` stores vpath, target, mtime, uid, and gid. Metadata-only — no real file on any drive, no parity coverage. Persisted as `symlink|VPATH|TARGET|MTIME_SEC|MTIME_NSEC|UID|GID` records in the content file.
 
 **Parity Engine** (`src/parity.c`):
 - Uses Intel ISA-L: `gf_gen_cauchy1_matrix`, `ec_init_tables`, `ec_encode_data`, `gf_invert_matrix`
@@ -131,6 +134,7 @@ prints a `PASS`/`FAIL` summary. Each section calls `wipe_data` to start clean.
 - `lr_state` (`state.h`) — root state object
 - `lr_file` — file metadata: vpath, drive, size, parity positions, mtime, mode, uid, gid, open_count
 - `lr_dir` — directory metadata: vpath, mode, uid, gid, mtime
+- `lr_symlink` — symlink metadata: vpath, target, mtime, uid, gid (no drive/parity)
 - `lr_drive` — drive name, directory path, and per-drive `lr_pos_allocator`
 - `lr_parity_handle` — open parity file descriptors + ISA-L encoding tables
 - `lr_pos_allocator` — sorted free-extent allocator; one per drive (embedded in `lr_drive`)

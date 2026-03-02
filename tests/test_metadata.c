@@ -181,12 +181,51 @@ static void test_allocator_persisted(void)
     cleanup();
 }
 
+/* Save a symlink and reload it; verify all 6 fields survive. */
+static void test_roundtrip_symlink(void)
+{
+    unlink(CONTENT_PATH);
+    lr_config cfg; make_config(&cfg);
+
+    /* --- save --- */
+    {
+        lr_state s; state_init(&s, &cfg);
+        lr_symlink *sl = calloc(1, sizeof(lr_symlink));
+        snprintf(sl->vpath,  PATH_MAX, "/link.txt");
+        snprintf(sl->target, PATH_MAX, "/real.txt");
+        sl->mtime_sec  = 1700000000;
+        sl->mtime_nsec = 999999999;
+        sl->uid        = 42;
+        sl->gid        = 43;
+        state_insert_symlink(&s, sl);
+        ASSERT_INT_EQ(metadata_save(&s), 0);
+        state_done(&s);
+    }
+
+    /* --- load --- */
+    {
+        lr_state s; state_init(&s, &cfg);
+        ASSERT_INT_EQ(metadata_load(&s), 0);
+        ASSERT_INT_EQ(s.symlink_list.count, 1);
+        lr_symlink *sl = state_find_symlink(&s, "/link.txt");
+        ASSERT(sl != NULL);
+        ASSERT(strcmp(sl->target, "/real.txt") == 0);
+        ASSERT_INT_EQ(sl->mtime_sec,  1700000000);
+        ASSERT_INT_EQ(sl->mtime_nsec, 999999999);
+        ASSERT_INT_EQ(sl->uid, 42);
+        ASSERT_INT_EQ(sl->gid, 43);
+        state_done(&s);
+    }
+    cleanup();
+}
+
 int main(void)
 {
     printf("test_metadata\n");
     RUN(test_fresh_start_no_file);
     RUN(test_roundtrip_file);
     RUN(test_roundtrip_dir);
+    RUN(test_roundtrip_symlink);
     RUN(test_old_format_compat);
     RUN(test_allocator_persisted);
     REPORT();
