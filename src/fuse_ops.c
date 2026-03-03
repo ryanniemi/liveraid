@@ -989,6 +989,23 @@ static int lr_rename(const char *from, const char *to, unsigned int flags)
             }
         }
 
+        /* Update all lr_symlink entries whose vpath has from as prefix */
+        node = lr_list_head(&s->symlink_list);
+        while (node) {
+            lr_symlink *sl = (lr_symlink *)node->data;
+            node = node->next;
+            if (strncmp(sl->vpath, from, from_len) == 0 &&
+                (sl->vpath[from_len] == '/' || sl->vpath[from_len] == '\0')) {
+                lr_hash_remove(&s->symlink_table, &sl->vpath_node);
+                char new_vpath[PATH_MAX];
+                snprintf(new_vpath, sizeof(new_vpath), "%s%s",
+                         to, sl->vpath + from_len);
+                snprintf(sl->vpath, sizeof(sl->vpath), "%s", new_vpath);
+                uint32_t h = lr_hash_string(sl->vpath);
+                lr_hash_insert(&s->symlink_table, &sl->vpath_node, sl, h);
+            }
+        }
+
         pthread_rwlock_unlock(&s->state_lock);
         return 0;
     }

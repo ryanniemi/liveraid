@@ -601,6 +601,19 @@ rm $MNT/link_to_file.txt
 [ -f $MNT/target.txt ] && pass "symlink: target intact after unlink" \
                          || fail "symlink: target intact after unlink"
 
+# Rename a directory containing a symlink; symlink must be accessible at new path
+mkdir -p $MNT/old_dir
+ln -s /target.txt $MNT/old_dir/inner_link
+mv $MNT/old_dir $MNT/new_dir
+val=$(readlink $MNT/new_dir/inner_link 2>/dev/null || echo "MISSING")
+[ "$val" = "/target.txt" ] && pass "symlink: accessible after parent dir rename" \
+                            || fail "symlink: accessible after parent dir rename" "got '$val'"
+
+# Verify the old path is gone
+val=$(readlink $MNT/old_dir/inner_link 2>/dev/null || echo "GONE")
+[ "$val" = "GONE" ] && pass "symlink: not accessible at old path after rename" \
+                      || fail "symlink: not accessible at old path after rename" "got '$val'"
+
 unmount_fs
 
 # ===================================================================
